@@ -94,13 +94,12 @@ def aiohttp_session_stub():
 # ------------------------
 # Tests next_retry_queue
 # ------------------------
-def test_next_retry_queue_ok():
-    rk0 = consumer.next_retry_queue(0)
-    rk1 = consumer.next_retry_queue(1)
-    rk2 = consumer.next_retry_queue(2)
-    rk3 = consumer.next_retry_queue(3)  # exhausted -> None
-    assert rk0 and rk1 and rk2
-    assert rk3 is None
+def test_next_retry_queue():
+    """Verify correct queue selection for each retry stage."""
+    assert consumer.next_retry_queue(0) == "rag.index.retry.30s.q"
+    assert consumer.next_retry_queue(1) == "rag.index.retry.5m.q"
+    assert consumer.next_retry_queue(2) == "rag.index.retry.1h.q"
+    assert consumer.next_retry_queue(3) is None
 
 
 # ------------------------
@@ -356,3 +355,91 @@ async def test_main_exits_with_nonzero_on_connection_failure(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         await consumer.main()
     assert exc_info.value.code == 1
+
+
+# ------------------------
+# ERRH-03: HTTP 429 raises TransientError
+# ------------------------
+@pytest.mark.asyncio
+async def test_delete_429_raises_transient_error(monkeypatch, headers_base, aiohttp_session_stub):
+    """HTTP 429 on delete path must raise TransientError, not FatalError."""
+    async def fake_delete(session, rag, partition, file_id):
+        return FakeResp(429, text_data="Rate limited")
+
+    monkeypatch.setattr(consumer, "rag_delete", fake_delete)
+    headers = {**headers_base, "action": "delete"}
+    msg = DummyMessage(body=b"", headers=headers)
+    with pytest.raises(TransientError):
+        await consumer.process_message(msg, aiohttp_session_stub)
+
+
+@pytest.mark.asyncio
+async def test_upsert_get_429_raises_transient_error(monkeypatch, headers_base, aiohttp_session_stub):
+    """HTTP 429 on upsert GET path must raise TransientError."""
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(429, text_data="Rate limited")
+
+    monkeypatch.setattr(consumer, "rag_get_file", fake_get)
+    headers = {**headers_base, "action": "upsert", "md5sum": "aaa"}
+    msg = DummyMessage(body=b"data", headers=headers)
+    with pytest.raises(TransientError):
+        await consumer.process_message(msg, aiohttp_session_stub)
+
+
+# ------------------------
+# ERRH-02: asyncio.TimeoutError wraps as TransientError
+# ------------------------
+@pytest.mark.asyncio
+async def test_timeout_raises_transient_error(monkeypatch, headers_base, aiohttp_session_stub):
+    """asyncio.TimeoutError must be caught and wrapped as TransientError."""
+    async def fake_delete(session, rag, partition, file_id):
+        raise asyncio.TimeoutError("Request timed out")
+
+    monkeypatch.setattr(consumer, "rag_delete", fake_delete)
+    headers = {**headers_base, "action": "delete"}
+    msg = DummyMessage(body=b"", headers=headers)
+    with pytest.raises(TransientError, match="[Tt]imeout"):
+        await consumer.process_message(msg, aiohttp_session_stub)
+
+
+# ------------------------
+# ERRH-01: Unknown action raises FatalError
+# ------------------------
+@pytest.mark.asyncio
+async def test_unknown_action_raises_fatal_error(monkeypatch, headers_base, aiohttp_session_stub):
+    """Unknown action must raise FatalError, not generic Exception."""
+    headers = {**headers_base, "action": "invalid_action"}
+    msg = DummyMessage(body=b"", headers=headers)
+    with pytest.raises(FatalError, match="Unknown action"):
+        await consumer.process_message(msg, aiohttp_session_stub)
+
+
+# ------------------------
+# get_retry_count: x-death parsing
+# ------------------------
+def test_get_retry_count_no_xdeath():
+    """First delivery -- no x-death header -- retry count is 0."""
+    msg = DummyMessage(body=b"", headers={})
+    assert consumer.get_retry_count(msg) == 0
+
+
+def test_get_retry_count_with_xdeath_entries():
+    """x-death with 2 expired entries means retry count is 2."""
+    msg = DummyMessage(body=b"", headers={
+        "x-death": [
+            {"queue": "rag.index.retry.30s.q", "reason": "expired"},
+            {"queue": "rag.index.retry.5m.q", "reason": "expired"},
+        ]
+    })
+    assert consumer.get_retry_count(msg) == 2
+
+
+def test_get_retry_count_ignores_non_expired():
+    """Only reason=expired entries count toward retry count."""
+    msg = DummyMessage(body=b"", headers={
+        "x-death": [
+            {"queue": "rag.index.retry.30s.q", "reason": "expired"},
+            {"queue": "rag.index.q", "reason": "rejected"},
+        ]
+    })
+    assert consumer.get_retry_count(msg) == 1
