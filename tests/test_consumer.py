@@ -6,6 +6,7 @@ from aiormq import AMQPConnectionError
 
 # On suppose que ton fichier s'appelle consumer.py
 import consumer
+from consumer import TransientError, FatalError
 
 
 # ------------------------
@@ -145,7 +146,7 @@ async def test_delete_5xx_retry_exception(
 
     headers = {**headers_base, "action": "delete"}
     msg = DummyMessage(body=b"", headers=headers)
-    with pytest.raises(consumer.TransientError) as ei:
+    with pytest.raises(TransientError) as ei:
         await consumer.process_message(msg, aiohttp_session_stub)
     assert "RAG delete 503" in str(ei.value)
 
@@ -154,7 +155,7 @@ async def test_delete_5xx_retry_exception(
 # UPSERT path - GET 5xx / 4xx
 # ------------------------
 @pytest.mark.asyncio
-async def test_upsert_get_5xx_raises_runtimeerror(
+async def test_upsert_get_5xx_raises_transient_error(
     monkeypatch, headers_base, aiohttp_session_stub
 ):
     async def fake_get(session, rag, partition, file_id):
@@ -165,13 +166,13 @@ async def test_upsert_get_5xx_raises_runtimeerror(
     headers = {**headers_base, "action": "upsert", "md5sum": "aaa"}
     msg = DummyMessage(body=b"data", headers=headers)
 
-    with pytest.raises(consumer.TransientError) as ei:
+    with pytest.raises(TransientError) as ei:
         await consumer.process_message(msg, aiohttp_session_stub)
     assert "RAG GET 500" in str(ei.value)
 
 
 @pytest.mark.asyncio
-async def test_upsert_get_4xx_raises_exception(
+async def test_upsert_get_4xx_raises_fatal_error(
     monkeypatch, headers_base, aiohttp_session_stub
 ):
     async def fake_get(session, rag, partition, file_id):
@@ -182,7 +183,7 @@ async def test_upsert_get_4xx_raises_exception(
     headers = {**headers_base, "action": "upsert", "md5sum": "aaa"}
     msg = DummyMessage(body=b"data", headers=headers)
 
-    with pytest.raises(consumer.FatalError) as ei:
+    with pytest.raises(FatalError) as ei:
         await consumer.process_message(msg, aiohttp_session_stub)
     assert "RAG GET 401" in str(ei.value)
 
