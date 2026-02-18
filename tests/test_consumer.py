@@ -91,14 +91,13 @@ def aiohttp_session_stub():
 
 
 # ------------------------
-# Tests next_retry_routing_key
+# Tests next_retry_queue
 # ------------------------
-def test_next_retry_routing_key_ok():
-    # RE-UTILISE la config du module
-    rk0 = consumer.next_retry_routing_key(0)
-    rk1 = consumer.next_retry_routing_key(1)
-    rk2 = consumer.next_retry_routing_key(2)
-    rk3 = consumer.next_retry_routing_key(3)  # hors limite -> None
+def test_next_retry_queue_ok():
+    rk0 = consumer.next_retry_queue(0)
+    rk1 = consumer.next_retry_queue(1)
+    rk2 = consumer.next_retry_queue(2)
+    rk3 = consumer.next_retry_queue(3)  # exhausted -> None
     assert rk0 and rk1 and rk2
     assert rk3 is None
 

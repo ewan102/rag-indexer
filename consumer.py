@@ -26,7 +26,6 @@ EXCHANGE_NAME = os.getenv("EXCHANGE_NAME", "rag.index.topic")
 ROUTING_KEY = os.getenv("ROUTING_KEY", "rag.index.*")
 QUEUE_NAME = os.getenv("QUEUE_NAME", "rag.index.q")
 
-RETRY_EXCHANGE = os.getenv("RETRY_EXCHANGE", "rag.index.retry.x")
 RETRY_QUEUES = [
     ("rag.index.retry.30s.q", 30_000),
     ("rag.index.retry.5m.q", 300_000),
@@ -67,11 +66,23 @@ class IndexMessage(BaseModel):
 
 
 # ---------- Helpers ----------
-def next_retry_routing_key(retry_count: int) -> Optional[str]:
-    """Select the next retry queue name by 'retry_count' (0-based)."""
+def get_retry_count(message: aio_pika.IncomingMessage) -> int:
+    """Count completed retry cycles from x-death header entries.
+
+    Each dead-letter cycle through a TTL retry queue adds an x-death entry
+    with reason='expired'. The count of such entries equals the number of
+    completed retry cycles.
+    """
+    x_death = (message.headers or {}).get("x-death")
+    if not x_death:
+        return 0
+    return sum(1 for entry in x_death if entry.get("reason") == "expired")
+
+
+def next_retry_queue(retry_count: int) -> str | None:
+    """Return the queue name for the given retry stage, or None if exhausted."""
     if retry_count < len(RETRY_QUEUES):
-        q, _ttl = RETRY_QUEUES[retry_count]
-        return q
+        return RETRY_QUEUES[retry_count][0]
     return None
 
 
@@ -284,73 +295,77 @@ async def process_message(
 
 
 # ---------- Retry / DLQ publishing ----------
-async def republish_to_retry(
-    channel: aio_pika.Channel, original_msg: aio_pika.IncomingMessage, retry_count: int
+async def publish_to_retry(
+    channel: aio_pika.Channel,
+    original_msg: aio_pika.IncomingMessage,
+    retry_queue_name: str,
 ) -> None:
-    rk_queue_name = next_retry_routing_key(retry_count)
-    if rk_queue_name is None:
-        # Plus de retry -> DLQ
-        dlq = await channel.get_queue(DLQ_NAME, ensure=True)
-        await channel.default_exchange.publish(
-            Message(
-                original_msg.body,
-                content_type=original_msg.content_type,
-                headers={**(original_msg.headers or {}), "x-retry-count": retry_count},
-                delivery_mode=DeliveryMode.PERSISTENT,
-            ),
-            routing_key=dlq.name,
-        )
-        return
-
-    # Publie vers la queue de retry dédiée
+    """Publish message copy to a retry delay queue via the default exchange."""
     await channel.default_exchange.publish(
         Message(
             original_msg.body,
             content_type=original_msg.content_type,
-            headers={**(original_msg.headers or {}), "x-retry-count": retry_count},
+            headers={**(original_msg.headers or {})},
             delivery_mode=DeliveryMode.PERSISTENT,
         ),
-        routing_key=rk_queue_name,
+        routing_key=retry_queue_name,
+    )
+
+
+async def publish_to_dlq(
+    channel: aio_pika.Channel,
+    original_msg: aio_pika.IncomingMessage,
+) -> None:
+    """Publish message copy to the dead letter queue."""
+    await channel.default_exchange.publish(
+        Message(
+            original_msg.body,
+            content_type=original_msg.content_type,
+            headers={**(original_msg.headers or {})},
+            delivery_mode=DeliveryMode.PERSISTENT,
+        ),
+        routing_key=DLQ_NAME,
     )
 
 
 # ---------- Topology declaration ----------
-async def declare_topology(channel: aio_pika.Channel):
-    # Exchanges
+async def declare_topology(channel: aio_pika.Channel) -> aio_pika.Queue:
+    """Declare exchanges, queues, and bindings. Returns the main queue."""
+    # Main exchange (topic, durable)
     main_ex = await channel.declare_exchange(
         EXCHANGE_NAME, ExchangeType.TOPIC, durable=True
     )
-    retry_ex = await channel.declare_exchange(
-        RETRY_EXCHANGE, ExchangeType.DIRECT, durable=True
-    )
 
-    # Main queue (DLX -> retry exchange)
+    # Main queue (QUORUM -- Raft replication for data safety)
     main_q = await channel.declare_queue(
         QUEUE_NAME,
         durable=True,
-        arguments={
-            "x-dead-letter-exchange": RETRY_EXCHANGE,
-        },
+        arguments={"x-queue-type": "quorum"},
     )
     await main_q.bind(main_ex, routing_key=ROUTING_KEY)
+    # Also receive messages returning from retry delay queues
+    await main_q.bind(main_ex, routing_key="rag.index.retry")
 
-    # Retry queues: TTL -> DLX back to main exchange
+    # Retry delay queues (CLASSIC -- no consumers, TTL only)
     for qname, ttl in RETRY_QUEUES:
-        q = await channel.declare_queue(
+        await channel.declare_queue(
             qname,
             durable=True,
             arguments={
                 "x-message-ttl": ttl,
                 "x-dead-letter-exchange": EXCHANGE_NAME,
-                # Route back to same routing key; ici on renvoie sur "rag.index.file"
-                "x-dead-letter-routing-key": "rag.index.file",
+                "x-dead-letter-routing-key": "rag.index.retry",
             },
         )
-        # Chaque queue est bindée sur l’exchange retry avec elle-même comme routing_key
-        await q.bind(retry_ex, routing_key=qname)
 
-    # DLQ finale
-    await channel.declare_queue(DLQ_NAME, durable=True)
+    # DLQ (QUORUM -- dead letters must never be lost)
+    await channel.declare_queue(
+        DLQ_NAME,
+        durable=True,
+        arguments={"x-queue-type": "quorum"},
+    )
+
+    return main_q
 
 
 # ---------- Consumer loop ----------
@@ -363,47 +378,38 @@ async def main():
 
     async with connection:
         channel = await connection.channel()
+        await channel.set_qos(prefetch_count=1)
 
-        await declare_topology(channel)
-
-        queue = await channel.get_queue(QUEUE_NAME)
+        queue = await declare_topology(channel)
 
         session_timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT + 5)
         async with aiohttp.ClientSession(timeout=session_timeout) as session:
 
             async with queue.iterator() as queue_iter:
-                # Cancel consuming after __aexit__
                 async for message in queue_iter:
                     async with message.process(ignore_processed=True, requeue=False):
-                        print("process message")
-                        # IMPORTANT: requeue=False -> on gère nous-même les retries
-                        headers = message.headers or {}
-                        retry_count = int(headers.get("x-retry-count", 0))
+                        retry_count = get_retry_count(message)
 
                         try:
                             await process_message(message, session)
-                            # ACK implicite via context manager si pas d’exception
+                            # ACK implicit via context manager on success
+
                         except ValidationError as ve:
-                            # Mauvais payload -> DLQ direct (non-retry)
-                            print(f"[NORETRY] invalid payload: {ve}", file=sys.stderr)
-                            await republish_to_retry(
-                                channel, message, MAX_RETRIES
-                            )  # pousse vers DLQ
-                            # Le context manager fera un ACK (on a republié)
-                        except RuntimeError as transient:
-                            # Erreurs supposées transitoires (5xx, timeouts, pannes RAG)
-                            print(
-                                f"[RETRY] transient error: {transient}", file=sys.stderr
-                            )
-                            await republish_to_retry(channel, message, retry_count + 1)
-                            # ACK le message courant (il est recopié vers retry)
-                        except Exception as fatal:
-                            # Erreurs 4xx/config/données invalides -> pas de retry prolongé
-                            print(f"[NORETRY] fatal error: {fatal}", file=sys.stderr)
-                            await republish_to_retry(
-                                channel, message, MAX_RETRIES
-                            )  # DLQ
-                            # ACK le message courant
+                            print(f"[FATAL] invalid payload: {ve}", file=sys.stderr)
+                            await publish_to_dlq(channel, message)
+
+                        except TransientError as te:
+                            print(f"[RETRY] transient error (attempt {retry_count + 1}): {te}", file=sys.stderr)
+                            queue_name = next_retry_queue(retry_count)
+                            if queue_name:
+                                await publish_to_retry(channel, message, queue_name)
+                            else:
+                                print(f"[DLQ] retries exhausted after {retry_count} attempts", file=sys.stderr)
+                                await publish_to_dlq(channel, message)
+
+                        except FatalError as fe:
+                            print(f"[FATAL] {fe}", file=sys.stderr)
+                            await publish_to_dlq(channel, message)
 
 
 if __name__ == "__main__":
