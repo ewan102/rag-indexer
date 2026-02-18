@@ -1,15 +1,46 @@
 import asyncio
 import json
 import os
+import signal
 import sys
 from typing import Optional, Dict, Any
 
 import aiohttp
 import aio_pika
 from aio_pika import ExchangeType, Message, DeliveryMode
+from aiohttp import web, FormData
 from aiormq import AMQPConnectionError
 from pydantic import BaseModel, Field, ValidationError
-from aiohttp import FormData
+
+# ---------- Shutdown coordination ----------
+shutdown_event = asyncio.Event()
+
+
+def request_shutdown():
+    """Signal handler — plain function, NOT async. Safe for loop.add_signal_handler()."""
+    print("SIGTERM received, initiating graceful shutdown...", file=sys.stderr)
+    shutdown_event.set()
+
+
+# ---------- Health endpoint ----------
+async def health_handler(request):
+    """Minimal health check — returns 200 if RabbitMQ connection is alive."""
+    connection = request.app["rmq_connection"]
+    if connection.is_closed:
+        return web.Response(status=503, text="unhealthy")
+    return web.Response(status=200, text="ok")
+
+
+async def start_health_server(connection, host="0.0.0.0", port=8080):
+    """Start a non-blocking HTTP health server alongside the consumer loop."""
+    app = web.Application()
+    app["rmq_connection"] = connection
+    app.router.add_get("/health", health_handler)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, host, port)
+    await site.start()
+    return runner
 
 # ---------- Error hierarchy ----------
 class TransientError(Exception):
@@ -376,40 +407,55 @@ async def main():
         print(f"Failed to connect to RabbitMQ: {e}", file=sys.stderr)
         sys.exit(1)
 
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+    loop.add_signal_handler(signal.SIGINT, request_shutdown)
+
     async with connection:
         channel = await connection.channel()
         await channel.set_qos(prefetch_count=1)
 
         queue = await declare_topology(channel)
 
+        health_runner = await start_health_server(connection)
+
         session_timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT + 5)
         async with aiohttp.ClientSession(timeout=session_timeout) as session:
+            try:
+                async with queue.iterator() as queue_iter:
+                    async for message in queue_iter:
+                        # Check shutdown BEFORE processing
+                        if shutdown_event.is_set():
+                            await message.nack(requeue=True)
+                            print("Shutdown: nacked and requeued in-flight message", file=sys.stderr)
+                            break
 
-            async with queue.iterator() as queue_iter:
-                async for message in queue_iter:
-                    async with message.process(ignore_processed=True, requeue=False):
-                        retry_count = get_retry_count(message)
+                        async with message.process(ignore_processed=True, requeue=False):
+                            retry_count = get_retry_count(message)
 
-                        try:
-                            await process_message(message, session)
-                            # ACK implicit via context manager on success
+                            try:
+                                await process_message(message, session)
+                                # ACK implicit via context manager on success
 
-                        except ValidationError as ve:
-                            print(f"[FATAL] invalid payload: {ve}", file=sys.stderr)
-                            await publish_to_dlq(channel, message)
-
-                        except TransientError as te:
-                            print(f"[RETRY] transient error (attempt {retry_count + 1}): {te}", file=sys.stderr)
-                            queue_name = next_retry_queue(retry_count)
-                            if queue_name:
-                                await publish_to_retry(channel, message, queue_name)
-                            else:
-                                print(f"[DLQ] retries exhausted after {retry_count} attempts", file=sys.stderr)
+                            except ValidationError as ve:
+                                print(f"[FATAL] invalid payload: {ve}", file=sys.stderr)
                                 await publish_to_dlq(channel, message)
 
-                        except FatalError as fe:
-                            print(f"[FATAL] {fe}", file=sys.stderr)
-                            await publish_to_dlq(channel, message)
+                            except TransientError as te:
+                                print(f"[RETRY] transient error (attempt {retry_count + 1}): {te}", file=sys.stderr)
+                                queue_name = next_retry_queue(retry_count)
+                                if queue_name:
+                                    await publish_to_retry(channel, message, queue_name)
+                                else:
+                                    print(f"[DLQ] retries exhausted after {retry_count} attempts", file=sys.stderr)
+                                    await publish_to_dlq(channel, message)
+
+                            except FatalError as fe:
+                                print(f"[FATAL] {fe}", file=sys.stderr)
+                                await publish_to_dlq(channel, message)
+            finally:
+                await health_runner.cleanup()
+                print("Shutdown complete", file=sys.stderr)
 
 
 if __name__ == "__main__":
