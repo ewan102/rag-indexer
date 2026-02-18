@@ -1,94 +1,11 @@
 import asyncio
-import json
-import types
+
 import pytest
-from aiormq import AMQPConnectionError
 
-# On suppose que ton fichier s'appelle consumer.py
-import consumer
-from consumer import TransientError, FatalError
-
-
-# ------------------------
-# Helpers & fakes
-# ------------------------
-class FakeResp:
-    def __init__(self, status: int, json_data=None, text_data=""):
-        self.status = status
-        self._json = json_data
-        self._text = text_data
-
-    async def json(self):
-        return self._json
-
-    async def text(self):
-        return self._text
-
-    async def read(self):
-        # le consumer attend parfois un "read()" pour vider le flux
-        return b""
-
-
-class FakeContextResp:
-    """Async context manager that mimics aiohttp response for get_producer_file tests."""
-    def __init__(self, status: int, body: bytes):
-        self.status = status
-        self._body = body
-
-    async def read(self):
-        return self._body
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-
-class FakeSession:
-    """Fake aiohttp.ClientSession whose .get() returns a FakeContextResp.
-
-    IMPORTANT: .get() must be a regular (synchronous) method, NOT async.
-    aiohttp's session.get() returns a context manager object synchronously;
-    the async part is the `async with` that calls __aenter__ on it.
-    """
-    def __init__(self, resp: FakeContextResp):
-        self._resp = resp
-
-    def get(self, url, headers=None, timeout=None):
-        # Returns the FakeContextResp directly -- it implements __aenter__/__aexit__
-        return self._resp
-
-
-class DummyMessage:
-    """Suffisant pour process_message(): expose .body et .headers."""
-
-    def __init__(self, body: bytes, headers: dict):
-        self.body = body
-        self.headers = headers
-
-
-@pytest.fixture
-def headers_base():
-    return {
-        "partition": "user-1",
-        "file_id": "file-123",
-        "rag_base_url": "http://rag:8000",
-        "rag_api_key": "secret",
-        "content_type": "application/octet-stream",
-    }
-
-
-@pytest.fixture
-def aiohttp_session_stub():
-    """Le process_message reçoit un session aiohttp, mais comme on monkeypatch
-    rag_get_file / rag_upsert / rag_delete, cette session ne sera pas réellement utilisée.
-    """
-
-    class _S:
-        pass
-
-    return _S()
+from rag_indexer import rag_client
+from rag_indexer.processing import process_message, get_retry_count, next_retry_queue
+from rag_indexer.errors import TransientError, FatalError
+from tests.conftest import FakeResp, DummyMessage
 
 
 # ------------------------
@@ -96,10 +13,10 @@ def aiohttp_session_stub():
 # ------------------------
 def test_next_retry_queue():
     """Verify correct queue selection for each retry stage."""
-    assert consumer.next_retry_queue(0) == "rag.index.retry.30s.q"
-    assert consumer.next_retry_queue(1) == "rag.index.retry.5m.q"
-    assert consumer.next_retry_queue(2) == "rag.index.retry.1h.q"
-    assert consumer.next_retry_queue(3) is None
+    assert next_retry_queue(0) == "rag.index.retry.30s.q"
+    assert next_retry_queue(1) == "rag.index.retry.5m.q"
+    assert next_retry_queue(2) == "rag.index.retry.1h.q"
+    assert next_retry_queue(3) is None
 
 
 # ------------------------
@@ -113,11 +30,11 @@ async def test_delete_200_ok(monkeypatch, headers_base, aiohttp_session_stub):
         call_log["called"] = True
         return FakeResp(200, text_data="OK")
 
-    monkeypatch.setattr(consumer, "rag_delete", fake_delete)
+    monkeypatch.setattr(rag_client, "rag_delete", fake_delete)
 
     headers = {**headers_base, "action": "delete"}
     msg = DummyMessage(body=b"", headers=headers)
-    await consumer.process_message(msg, aiohttp_session_stub)
+    await process_message(msg, aiohttp_session_stub)
     assert call_log.get("called") is True
 
 
@@ -126,12 +43,12 @@ async def test_delete_404_ok(monkeypatch, headers_base, aiohttp_session_stub):
     async def fake_delete(session, rag, partition, file_id):
         return FakeResp(404, text_data="Not Found")
 
-    monkeypatch.setattr(consumer, "rag_delete", fake_delete)
+    monkeypatch.setattr(rag_client, "rag_delete", fake_delete)
 
     headers = {**headers_base, "action": "delete"}
     msg = DummyMessage(body=b"", headers=headers)
     # 404 doit passer sans exception
-    await consumer.process_message(msg, aiohttp_session_stub)
+    await process_message(msg, aiohttp_session_stub)
 
 
 @pytest.mark.asyncio
@@ -141,12 +58,12 @@ async def test_delete_5xx_retry_exception(
     async def fake_delete(session, rag, partition, file_id):
         return FakeResp(503, text_data="RAG down")
 
-    monkeypatch.setattr(consumer, "rag_delete", fake_delete)
+    monkeypatch.setattr(rag_client, "rag_delete", fake_delete)
 
     headers = {**headers_base, "action": "delete"}
     msg = DummyMessage(body=b"", headers=headers)
     with pytest.raises(TransientError) as ei:
-        await consumer.process_message(msg, aiohttp_session_stub)
+        await process_message(msg, aiohttp_session_stub)
     assert "RAG delete 503" in str(ei.value)
 
 
@@ -160,13 +77,13 @@ async def test_upsert_get_5xx_raises_transient_error(
     async def fake_get(session, rag, partition, file_id):
         return FakeResp(500, text_data="boom")
 
-    monkeypatch.setattr(consumer, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
 
     headers = {**headers_base, "action": "upsert", "md5sum": "aaa"}
     msg = DummyMessage(body=b"data", headers=headers)
 
     with pytest.raises(TransientError) as ei:
-        await consumer.process_message(msg, aiohttp_session_stub)
+        await process_message(msg, aiohttp_session_stub)
     assert "RAG GET 500" in str(ei.value)
 
 
@@ -177,13 +94,13 @@ async def test_upsert_get_4xx_raises_fatal_error(
     async def fake_get(session, rag, partition, file_id):
         return FakeResp(401, text_data="unauthorized")
 
-    monkeypatch.setattr(consumer, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
 
     headers = {**headers_base, "action": "upsert", "md5sum": "aaa"}
     msg = DummyMessage(body=b"data", headers=headers)
 
     with pytest.raises(FatalError) as ei:
-        await consumer.process_message(msg, aiohttp_session_stub)
+        await process_message(msg, aiohttp_session_stub)
     assert "RAG GET 401" in str(ei.value)
 
 
@@ -205,11 +122,11 @@ async def test_upsert_new_on_404_triggers_post(
             "is_new": is_new,
             "msg": msg,
         }
-        # Simule un succès
+        # Simule un succes
         return None
 
-    monkeypatch.setattr(consumer, "rag_get_file", fake_get)
-    monkeypatch.setattr(consumer, "rag_upsert", fake_upsert)
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
 
     body = b"PDFDATA"
     headers = {
@@ -221,19 +138,19 @@ async def test_upsert_new_on_404_triggers_post(
     }
     msg = DummyMessage(body=body, headers=headers)
 
-    await consumer.process_message(msg, aiohttp_session_stub)
+    await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
     assert calls["upsert"]["file_bytes"] == body
     assert calls["upsert"]["is_new"] is True
-    # vérifie quelques champs du message reconstruit par le consumer
+    # verifie quelques champs du message reconstruit par le consumer
     m = calls["upsert"]["msg"]
     assert m.file_id == headers_base["file_id"]
     assert m.partition == headers_base["partition"]
 
 
 # ------------------------
-# UPSERT path - GET 200 => md5 différent => PUT (is_new=False)
+# UPSERT path - GET 200 => md5 different => PUT (is_new=False)
 # ------------------------
 @pytest.mark.asyncio
 async def test_upsert_update_on_md5_change_triggers_put(
@@ -249,14 +166,14 @@ async def test_upsert_update_on_md5_change_triggers_put(
         calls["upsert"] = {"file_bytes": file_bytes, "is_new": is_new}
         return None
 
-    monkeypatch.setattr(consumer, "rag_get_file", fake_get)
-    monkeypatch.setattr(consumer, "rag_upsert", fake_upsert)
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
 
     body = b"PDFDATA"
     headers = {**headers_base, "action": "upsert", "md5sum": "NEW"}
     msg = DummyMessage(body=body, headers=headers)
 
-    await consumer.process_message(msg, aiohttp_session_stub)
+    await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
     assert calls["upsert"]["file_bytes"] == body
@@ -264,7 +181,7 @@ async def test_upsert_update_on_md5_change_triggers_put(
 
 
 # ------------------------
-# UPSERT path - GET 200 => md5 identique => rien à faire
+# UPSERT path - GET 200 => md5 identique => rien a faire
 # ------------------------
 @pytest.mark.asyncio
 async def test_upsert_same_md5_skips(monkeypatch, headers_base, aiohttp_session_stub):
@@ -276,85 +193,14 @@ async def test_upsert_same_md5_skips(monkeypatch, headers_base, aiohttp_session_
     async def fake_upsert(session, msg, file_bytes, is_new):
         called["upsert"] = True
 
-    monkeypatch.setattr(consumer, "rag_get_file", fake_get)
-    monkeypatch.setattr(consumer, "rag_upsert", fake_upsert)
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
 
     headers = {**headers_base, "action": "upsert", "md5sum": "SAME"}
     msg = DummyMessage(body=b"ignored", headers=headers)
 
-    await consumer.process_message(msg, aiohttp_session_stub)
+    await process_message(msg, aiohttp_session_stub)
     assert called["upsert"] is False
-
-
-# ------------------------
-# BUGF-01: File download reads inside context manager
-# ------------------------
-@pytest.mark.asyncio
-async def test_get_producer_file_reads_inside_context():
-    expected_bytes = b"file-content-here"
-    fake_resp = FakeContextResp(status=200, body=expected_bytes)
-    fake_session = FakeSession(fake_resp)
-
-    msg = consumer.IndexMessage(
-        action="upsert",
-        partition="p1",
-        file_id="f1",
-        rag=consumer.RagConn(base_url="http://rag:8000", api_key="key"),
-        content=consumer.ContentSpec(file_url="http://example.com/file.bin"),
-    )
-    result = await consumer.get_producer_file(fake_session, msg)
-    assert result == expected_bytes
-
-
-# ------------------------
-# BUGF-02: Metadata merge
-# ------------------------
-def test_build_metadata_merges_app_metadata():
-    msg = consumer.IndexMessage(
-        action="upsert",
-        partition="p1",
-        file_id="f1",
-        rag=consumer.RagConn(base_url="http://rag:8000", api_key="key"),
-        version="v1",
-        doctype="pdf",
-        app_metadata={"custom_key": "custom_value", "author": "test"},
-    )
-    meta = consumer.build_metadata(msg)
-    assert meta["custom_key"] == "custom_value"
-    assert meta["author"] == "test"
-    assert meta["version"] == "v1"
-    assert meta["doctype"] == "pdf"
-
-
-def test_build_metadata_without_app_metadata():
-    msg = consumer.IndexMessage(
-        action="upsert",
-        partition="p1",
-        file_id="f1",
-        rag=consumer.RagConn(base_url="http://rag:8000", api_key="key"),
-        version="v1",
-        doctype="pdf",
-    )
-    meta = consumer.build_metadata(msg)
-    assert meta["version"] == "v1"
-    assert meta["doctype"] == "pdf"
-    # No extra keys beyond the base fields
-    assert "custom_key" not in meta
-
-
-# ------------------------
-# BUGF-03: Exit code on connection failure
-# ------------------------
-@pytest.mark.asyncio
-async def test_main_exits_with_nonzero_on_connection_failure(monkeypatch):
-    async def fake_connect_robust(url):
-        raise AMQPConnectionError("Connection refused")
-
-    monkeypatch.setattr("aio_pika.connect_robust", fake_connect_robust)
-
-    with pytest.raises(SystemExit) as exc_info:
-        await consumer.main()
-    assert exc_info.value.code == 1
 
 
 # ------------------------
@@ -366,11 +212,11 @@ async def test_delete_429_raises_transient_error(monkeypatch, headers_base, aioh
     async def fake_delete(session, rag, partition, file_id):
         return FakeResp(429, text_data="Rate limited")
 
-    monkeypatch.setattr(consumer, "rag_delete", fake_delete)
+    monkeypatch.setattr(rag_client, "rag_delete", fake_delete)
     headers = {**headers_base, "action": "delete"}
     msg = DummyMessage(body=b"", headers=headers)
     with pytest.raises(TransientError):
-        await consumer.process_message(msg, aiohttp_session_stub)
+        await process_message(msg, aiohttp_session_stub)
 
 
 @pytest.mark.asyncio
@@ -379,11 +225,11 @@ async def test_upsert_get_429_raises_transient_error(monkeypatch, headers_base, 
     async def fake_get(session, rag, partition, file_id):
         return FakeResp(429, text_data="Rate limited")
 
-    monkeypatch.setattr(consumer, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
     headers = {**headers_base, "action": "upsert", "md5sum": "aaa"}
     msg = DummyMessage(body=b"data", headers=headers)
     with pytest.raises(TransientError):
-        await consumer.process_message(msg, aiohttp_session_stub)
+        await process_message(msg, aiohttp_session_stub)
 
 
 # ------------------------
@@ -395,11 +241,11 @@ async def test_timeout_raises_transient_error(monkeypatch, headers_base, aiohttp
     async def fake_delete(session, rag, partition, file_id):
         raise asyncio.TimeoutError("Request timed out")
 
-    monkeypatch.setattr(consumer, "rag_delete", fake_delete)
+    monkeypatch.setattr(rag_client, "rag_delete", fake_delete)
     headers = {**headers_base, "action": "delete"}
     msg = DummyMessage(body=b"", headers=headers)
     with pytest.raises(TransientError, match="[Tt]imeout"):
-        await consumer.process_message(msg, aiohttp_session_stub)
+        await process_message(msg, aiohttp_session_stub)
 
 
 # ------------------------
@@ -411,7 +257,7 @@ async def test_unknown_action_raises_fatal_error(monkeypatch, headers_base, aioh
     headers = {**headers_base, "action": "invalid_action"}
     msg = DummyMessage(body=b"", headers=headers)
     with pytest.raises(FatalError, match="Unknown action"):
-        await consumer.process_message(msg, aiohttp_session_stub)
+        await process_message(msg, aiohttp_session_stub)
 
 
 # ------------------------
@@ -420,7 +266,7 @@ async def test_unknown_action_raises_fatal_error(monkeypatch, headers_base, aioh
 def test_get_retry_count_no_xdeath():
     """First delivery -- no x-death header -- retry count is 0."""
     msg = DummyMessage(body=b"", headers={})
-    assert consumer.get_retry_count(msg) == 0
+    assert get_retry_count(msg) == 0
 
 
 def test_get_retry_count_with_xdeath_entries():
@@ -431,7 +277,7 @@ def test_get_retry_count_with_xdeath_entries():
             {"queue": "rag.index.retry.5m.q", "reason": "expired"},
         ]
     })
-    assert consumer.get_retry_count(msg) == 2
+    assert get_retry_count(msg) == 2
 
 
 def test_get_retry_count_ignores_non_expired():
@@ -442,4 +288,4 @@ def test_get_retry_count_ignores_non_expired():
             {"queue": "rag.index.q", "reason": "rejected"},
         ]
     })
-    assert consumer.get_retry_count(msg) == 1
+    assert get_retry_count(msg) == 1
