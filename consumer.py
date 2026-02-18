@@ -11,6 +11,15 @@ from aiormq import AMQPConnectionError
 from pydantic import BaseModel, Field, ValidationError
 from aiohttp import FormData
 
+# ---------- Error hierarchy ----------
+class TransientError(Exception):
+    """Retryable failure. Consumer will route to the appropriate retry delay queue."""
+
+
+class FatalError(Exception):
+    """Non-retryable failure. Consumer will route directly to DLQ."""
+
+
 # ---------- Config via env ----------
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 EXCHANGE_NAME = os.getenv("EXCHANGE_NAME", "rag.index.topic")
@@ -90,11 +99,22 @@ async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -
     if msg.content.file_bearer:
         headers["Authorization"] = f"Bearer {msg.content.file_bearer}"
 
-    async with session.get(msg.content.file_url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
-        if resp.status >= 400:
-            raise RuntimeError(f"Failed to fetch file_url ({resp.status})")
-        file = await resp.read()
-    return file
+    try:
+        async with session.get(msg.content.file_url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
+            if resp.status == 429 or resp.status >= 500:
+                raise TransientError(f"Failed to fetch file_url ({resp.status})")
+            if resp.status >= 400:
+                raise FatalError(f"Failed to fetch file_url ({resp.status})")
+            file = await resp.read()
+        return file
+    except TransientError:
+        raise
+    except FatalError:
+        raise
+    except asyncio.TimeoutError as e:
+        raise TransientError(f"Timeout fetching file_url: {e}") from e
+    except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError) as e:
+        raise TransientError(f"Network error fetching file_url: {e}") from e
 
 def build_metadata(msg: IndexMessage) -> Dict[str, Any]:
     meta = {
@@ -127,7 +147,7 @@ async def rag_upsert(
     elif msg.content and msg.content.file_url:
         data_bytes = await get_producer_file(session, msg)
     else:
-        raise RuntimeError("No content provided")
+        raise FatalError("No content provided")
 
     content_type = msg.content_type or "application/octet-stream"
     form.add_field("file", data_bytes, filename=filename, content_type=content_type)
@@ -162,11 +182,10 @@ async def rag_upsert(
     ) as resp:
         # lecture pour vider le flux (évite connexion occupée)
         resp_text = await resp.text()
-        if resp.status >= 500:
-            raise RuntimeError(f"RAG {method} 5xx: {resp.status} {resp_text}")
+        if resp.status == 429 or resp.status >= 500:
+            raise TransientError(f"RAG {method} {resp.status}: {resp_text}")
         if resp.status >= 400:
-            # Non-retry sur 4xx par défaut (config/données invalides)
-            raise Exception(f"RAG {method} failed {resp.status}: {resp_text}")
+            raise FatalError(f"RAG {method} {resp.status}: {resp_text}")
         return
 
 
@@ -210,23 +229,22 @@ async def process_message(
             if 200 <= resp.status < 300 or resp.status == 404:
                 await resp.read()
                 return
-            # 5xx -> retry
-            if resp.status >= 500:
-                text = await resp.text()
-                raise RuntimeError(f"RAG delete 5xx: {resp.status} {text}")
-            # autres 4xx -> non-retry (ex: 401/403 -> config)
+            # 429 or 5xx -> retry
             text = await resp.text()
-            raise Exception(f"RAG delete failed {resp.status}: {text}")
+            if resp.status == 429 or resp.status >= 500:
+                raise TransientError(f"RAG delete {resp.status}: {text}")
+            # other 4xx -> non-retry (e.g. 401/403 -> config)
+            raise FatalError(f"RAG delete {resp.status}: {text}")
 
         # UPSERT path
         if msg.action == "upsert":
             # 1) GET current
             print("go get file")
             resp = await rag_get_file(session, msg.rag, msg.partition, msg.file_id)
-            if resp.status >= 500:
-                print("RAG GET 5xx", resp.status)
+            if resp.status == 429 or resp.status >= 500:
+                print("RAG GET error", resp.status)
                 text = await resp.text()
-                raise RuntimeError(f"RAG GET 5xx: {resp.status} {text}")
+                raise TransientError(f"RAG GET {resp.status}: {text}")
 
             need_index = False
             is_new = False
@@ -240,9 +258,9 @@ async def process_message(
                 need_index = True
                 is_new = True
             else:
-                # autres 4xx -> non-retry (probablement mauvaise auth/config)
+                # other 4xx -> non-retry (bad auth/config)
                 text = await resp.text()
-                raise Exception(f"RAG GET failed {resp.status}: {text}")
+                raise FatalError(f"RAG GET {resp.status}: {text}")
 
             if not need_index:
                 return  # rien à faire
@@ -250,11 +268,19 @@ async def process_message(
             # 2) Build multipart & send
             return await rag_upsert(session, msg, body_bytes, is_new)
         else:
-            raise Exception(f"Unknown action: {msg.action}")
+            raise FatalError(f"Unknown action: {msg.action}")
 
+    except TransientError:
+        raise
+    except FatalError:
+        raise
+    except asyncio.TimeoutError as e:
+        raise TransientError(f"Timeout: {e}") from e
+    except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError) as e:
+        raise TransientError(f"Network error: {e}") from e
     except Exception as e:
-        print("process message failed", e)
-        raise e
+        # Unexpected error -- treat as fatal to avoid infinite retry
+        raise FatalError(f"Unexpected error: {e}") from e
 
 
 # ---------- Retry / DLQ publishing ----------

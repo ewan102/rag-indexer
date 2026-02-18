@@ -146,9 +146,9 @@ async def test_delete_5xx_retry_exception(
 
     headers = {**headers_base, "action": "delete"}
     msg = DummyMessage(body=b"", headers=headers)
-    with pytest.raises(RuntimeError) as ei:
+    with pytest.raises(consumer.TransientError) as ei:
         await consumer.process_message(msg, aiohttp_session_stub)
-    assert "RAG delete 5xx" in str(ei.value)
+    assert "RAG delete 503" in str(ei.value)
 
 
 # ------------------------
@@ -166,9 +166,9 @@ async def test_upsert_get_5xx_raises_runtimeerror(
     headers = {**headers_base, "action": "upsert", "md5sum": "aaa"}
     msg = DummyMessage(body=b"data", headers=headers)
 
-    with pytest.raises(RuntimeError) as ei:
+    with pytest.raises(consumer.TransientError) as ei:
         await consumer.process_message(msg, aiohttp_session_stub)
-    assert "RAG GET 5xx" in str(ei.value)
+    assert "RAG GET 500" in str(ei.value)
 
 
 @pytest.mark.asyncio
@@ -183,9 +183,9 @@ async def test_upsert_get_4xx_raises_exception(
     headers = {**headers_base, "action": "upsert", "md5sum": "aaa"}
     msg = DummyMessage(body=b"data", headers=headers)
 
-    with pytest.raises(Exception) as ei:
+    with pytest.raises(consumer.FatalError) as ei:
         await consumer.process_message(msg, aiohttp_session_stub)
-    assert "RAG GET failed 401" in str(ei.value)
+    assert "RAG GET 401" in str(ei.value)
 
 
 # ------------------------
