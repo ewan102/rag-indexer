@@ -150,7 +150,7 @@ async def test_upsert_new_on_404_triggers_post(
 
 
 # ------------------------
-# UPSERT path - GET 200 => md5 different => PUT (is_new=False)
+# UPSERT path - GET 200 => version different => PUT (is_new=False)
 # ------------------------
 @pytest.mark.asyncio
 async def test_upsert_update_on_md5_change_triggers_put(
@@ -159,8 +159,8 @@ async def test_upsert_update_on_md5_change_triggers_put(
     calls = {"upsert": None}
 
     async def fake_get(session, rag, partition, file_id):
-        # Le document existe avec md5sum "OLD"
-        return FakeResp(200, json_data={"metadata": {"md5sum": "OLD"}})
+        # Document exists with version "OLD"
+        return FakeResp(200, json_data={"metadata": {"version": "OLD"}})
 
     async def fake_upsert(session, msg, file_bytes, is_new):
         calls["upsert"] = {"file_bytes": file_bytes, "is_new": is_new}
@@ -170,7 +170,7 @@ async def test_upsert_update_on_md5_change_triggers_put(
     monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
 
     body = b"PDFDATA"
-    headers = {**headers_base, "action": "upsert", "md5sum": "NEW"}
+    headers = {**headers_base, "action": "upsert", "version": "NEW"}
     msg = DummyMessage(body=body, headers=headers)
 
     await process_message(msg, aiohttp_session_stub)

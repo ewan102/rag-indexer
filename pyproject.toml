@@ -1,0 +1,26 @@
+[project]
+name = "rag-indexer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+
+
+dependencies = [
+  "aio-pika>=9.4",
+  "aiohttp>=3.10",
+  "pydantic>=2.7",
+  "python-dotenv>=1.2.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "aioresponses>=0.7.8",
+    "pytest-docker>=3.2.5",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
