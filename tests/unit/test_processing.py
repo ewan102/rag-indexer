@@ -1,5 +1,6 @@
 import asyncio
 
+import aiohttp
 import pytest
 
 from rag_indexer import rag_client
@@ -289,3 +290,127 @@ def test_get_retry_count_ignores_non_expired():
         ]
     })
     assert get_retry_count(msg) == 1
+
+
+# ------------------------
+# NEW: Error classification tests (TEST-01)
+# ------------------------
+@pytest.mark.asyncio
+async def test_missing_file_id_raises_fatal_error(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """Message with file_id missing from headers triggers FatalError.
+
+    IndexMessage has `file_id: str` (required). When headers lack file_id,
+    headers.get("file_id") returns None, and Pydantic validation raises
+    ValidationError which the catch-all wraps as FatalError.
+    """
+    headers = {k: v for k, v in headers_base.items() if k != "file_id"}
+    headers["action"] = "delete"
+    msg = DummyMessage(body=b"", headers=headers)
+    with pytest.raises(FatalError, match="[Uu]nexpected|[Vv]alidation"):
+        await process_message(msg, aiohttp_session_stub)
+
+
+@pytest.mark.asyncio
+async def test_empty_body_upsert_calls_rag_upsert_with_empty_bytes(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """Upsert with empty body (b'') but valid headers should NOT be an error.
+
+    processing.py passes body_bytes directly to rag_upsert. Verify rag_upsert
+    is called with empty bytes.
+    """
+    calls = {"upsert": None}
+
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(404)
+
+    async def fake_upsert(session, msg, file_bytes, is_new):
+        calls["upsert"] = {"file_bytes": file_bytes, "is_new": is_new}
+        return None
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+
+    headers = {**headers_base, "action": "upsert"}
+    msg = DummyMessage(body=b"", headers=headers)
+    await process_message(msg, aiohttp_session_stub)
+
+    assert calls["upsert"] is not None
+    assert calls["upsert"]["file_bytes"] == b""
+    assert calls["upsert"]["is_new"] is True
+
+
+@pytest.mark.asyncio
+async def test_server_disconnected_error_raises_transient(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """aiohttp.ServerDisconnectedError on delete must raise TransientError with 'Network error'."""
+    async def fake_delete(session, rag, partition, file_id):
+        raise aiohttp.ServerDisconnectedError("disconnected")
+
+    monkeypatch.setattr(rag_client, "rag_delete", fake_delete)
+    headers = {**headers_base, "action": "delete"}
+    msg = DummyMessage(body=b"", headers=headers)
+    with pytest.raises(TransientError, match="Network error"):
+        await process_message(msg, aiohttp_session_stub)
+
+
+@pytest.mark.asyncio
+async def test_server_disconnected_on_get_raises_transient(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """aiohttp.ServerDisconnectedError on upsert GET path must raise TransientError."""
+    async def fake_get(session, rag, partition, file_id):
+        raise aiohttp.ServerDisconnectedError("disconnected")
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    headers = {**headers_base, "action": "upsert"}
+    msg = DummyMessage(body=b"data", headers=headers)
+    with pytest.raises(TransientError, match="Network error"):
+        await process_message(msg, aiohttp_session_stub)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exception_raises_fatal(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """Unexpected ValueError on rag_delete must raise FatalError with 'Unexpected error'."""
+    async def fake_delete(session, rag, partition, file_id):
+        raise ValueError("something weird")
+
+    monkeypatch.setattr(rag_client, "rag_delete", fake_delete)
+    headers = {**headers_base, "action": "delete"}
+    msg = DummyMessage(body=b"", headers=headers)
+    with pytest.raises(FatalError, match="Unexpected error"):
+        await process_message(msg, aiohttp_session_stub)
+
+
+@pytest.mark.asyncio
+async def test_upsert_get_200_no_version_no_md5sum_reindexes(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """GET returns 200 with empty metadata (no version/md5sum).
+
+    When msg has no version either, version_remote is falsy so need_index=True.
+    Assert rag_upsert is called with is_new=False.
+    """
+    calls = {"upsert": None}
+
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(200, json_data={"metadata": {}})
+
+    async def fake_upsert(session, msg, file_bytes, is_new):
+        calls["upsert"] = {"file_bytes": file_bytes, "is_new": is_new}
+        return None
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+
+    headers = {**headers_base, "action": "upsert"}
+    msg = DummyMessage(body=b"data", headers=headers)
+    await process_message(msg, aiohttp_session_stub)
+
+    assert calls["upsert"] is not None
+    assert calls["upsert"]["is_new"] is False
