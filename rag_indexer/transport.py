@@ -1,11 +1,14 @@
 import asyncio
-import sys
 
 import aio_pika
+import structlog
 from aio_pika import ExchangeType, Message, DeliveryMode
 from aiohttp import web
+from prometheus_client.aiohttp import make_aiohttp_handler
 
 from rag_indexer.config import EXCHANGE_NAME, ROUTING_KEY, QUEUE_NAME, RETRY_QUEUES, DLQ_NAME
+
+log = structlog.get_logger()
 
 
 # ---------- Shutdown coordination ----------
@@ -14,7 +17,7 @@ shutdown_event = asyncio.Event()
 
 def request_shutdown():
     """Signal handler -- plain function, NOT async. Safe for loop.add_signal_handler()."""
-    print("SIGTERM received, initiating graceful shutdown...", file=sys.stderr)
+    log.warning("sigterm_received", detail="initiating graceful shutdown")
     shutdown_event.set()
 
 
@@ -23,8 +26,8 @@ async def health_handler(request):
     """Minimal health check -- returns 200 if RabbitMQ connection is alive."""
     connection = request.app["rmq_connection"]
     if connection.is_closed:
-        return web.Response(status=503, text="unhealthy")
-    return web.Response(status=200, text="ok")
+        return web.json_response({"status": "unhealthy"}, status=503)
+    return web.json_response({"status": "healthy"}, status=200)
 
 
 async def start_health_server(connection, host="0.0.0.0", port=8080):
@@ -32,6 +35,7 @@ async def start_health_server(connection, host="0.0.0.0", port=8080):
     app = web.Application()
     app["rmq_connection"] = connection
     app.router.add_get("/health", health_handler)
+    app.router.add_get("/metrics", make_aiohttp_handler())
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
