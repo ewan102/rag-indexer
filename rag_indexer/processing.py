@@ -2,11 +2,14 @@ import asyncio
 
 import aio_pika
 import aiohttp
+import structlog
 
 from rag_indexer import rag_client
 from rag_indexer.config import RETRY_QUEUES
 from rag_indexer.models import IndexMessage, RagConn, ContentSpec
 from rag_indexer.errors import TransientError, FatalError
+
+log = structlog.get_logger()
 
 
 def get_retry_count(message: aio_pika.IncomingMessage) -> int:
@@ -60,7 +63,7 @@ async def process_message(
                 file_bearer=headers.get("file_bearer"),
             ),
         )
-        print("process new message", msg)
+        log.debug("message_processing")
         # DELETE path
         if msg.action == "delete":
             resp = await rag_client.rag_delete(session, msg.rag, msg.partition, msg.file_id)
@@ -78,10 +81,10 @@ async def process_message(
         # UPSERT path
         if msg.action == "upsert":
             # 1) GET current
-            print("go get file")
+            log.debug("rag_get_file", detail="checking current version")
             resp = await rag_client.rag_get_file(session, msg.rag, msg.partition, msg.file_id)
             if resp.status == 429 or resp.status >= 500:
-                print("RAG GET error", resp.status)
+                log.debug("rag_get_error", status=resp.status)
                 text = await resp.text()
                 raise TransientError(f"RAG GET {resp.status}: {text}")
 

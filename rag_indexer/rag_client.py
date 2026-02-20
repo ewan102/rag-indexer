@@ -3,16 +3,20 @@ import json
 from typing import Dict, Any
 
 import aiohttp
+import structlog
 from aiohttp import FormData
 
 from rag_indexer.config import HTTP_TIMEOUT
 from rag_indexer.models import IndexMessage, RagConn, ContentSpec
 from rag_indexer.errors import TransientError, FatalError
 
+log = structlog.get_logger()
+
 
 async def rag_get_file(
     session: aiohttp.ClientSession, rag: RagConn, partition: str, file_id: str
 ) -> aiohttp.ClientResponse:
+    log.debug("rag_api_call", method="GET", endpoint="file")
     url = f"{rag.base_url}/partition/{partition}/file/{file_id}"
     return await session.get(
         url, headers={"Authorization": f"Bearer {rag.api_key}"}, timeout=HTTP_TIMEOUT
@@ -22,6 +26,7 @@ async def rag_get_file(
 async def rag_delete(
     session: aiohttp.ClientSession, rag: RagConn, partition: str, file_id: str
 ) -> aiohttp.ClientResponse:
+    log.debug("rag_api_call", method="DELETE", endpoint="file")
     url = f"{rag.base_url}/indexer/partition/{partition}/file/{file_id}"
     return await session.delete(
         url, headers={"Authorization": f"Bearer {rag.api_key}"}, timeout=HTTP_TIMEOUT
@@ -33,6 +38,7 @@ async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -
     if msg.content.file_bearer:
         headers["Authorization"] = f"Bearer {msg.content.file_bearer}"
 
+    log.debug("file_download", source="file_url")
     try:
         async with session.get(msg.content.file_url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
             if resp.status == 429 or resp.status >= 500:
@@ -107,6 +113,7 @@ async def rag_upsert(
     method = "POST" if is_new else "PUT"
     headers = {"Authorization": f"Bearer {msg.rag.api_key}"}
 
+    log.debug("rag_api_call", method=method, endpoint="indexer")
     async with session.request(
         method,
         url_base,
