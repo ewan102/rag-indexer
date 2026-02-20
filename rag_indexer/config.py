@@ -14,3 +14,5 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", str(len(RETRY_QUEUES))))
 DLQ_NAME = os.getenv("DLQ_NAME", "rag.index.dlq")
 
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "60"))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
