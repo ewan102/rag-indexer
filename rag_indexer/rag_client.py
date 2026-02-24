@@ -144,6 +144,8 @@ async def rag_upsert(
         resp_text = await resp.text()
         if resp.status == 429 or resp.status >= 500:
             raise TransientError(f"RAG {method} {resp.status}: {resp_text}")
+        if resp.status == 409:
+            raise TransientError(f"RAG {method} {resp.status} Conflict: {resp_text}")
         if resp.status >= 400:
             raise FatalError(f"RAG {method} {resp.status}: {resp_text}")
         return

@@ -388,6 +388,27 @@ async def test_unexpected_exception_raises_fatal(
 
 
 @pytest.mark.asyncio
+async def test_upsert_post_409_raises_transient_error(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """POST returning 409 Conflict (race condition) should be TransientError, not FatalError."""
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(404)
+
+    async def fake_upsert(session, msg, file_bytes, is_new):
+        from rag_indexer.errors import TransientError
+        raise TransientError("RAG POST 409 Conflict: File already exists")
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+
+    headers = {**headers_base, "action": "upsert"}
+    msg = DummyMessage(body=b"data", headers=headers)
+    with pytest.raises(TransientError, match="409"):
+        await process_message(msg, aiohttp_session_stub)
+
+
+@pytest.mark.asyncio
 async def test_upsert_get_200_no_version_no_md5sum_reindexes(
     monkeypatch, headers_base, aiohttp_session_stub
 ):
