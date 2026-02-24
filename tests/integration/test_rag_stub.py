@@ -62,8 +62,7 @@ async def test_rag_get_file_calls_correct_url(rag_stub):
 
     async with aiohttp.ClientSession() as session:
         resp = await rag_get_file(session, rag, "p1", "f1")
-        # Read response to avoid unclosed resource warning
-        await resp.read()
+        assert resp.status == 200
 
     assert len(call_log) == 1
     assert call_log[0]["method"] == "GET"
@@ -78,7 +77,7 @@ async def test_rag_delete_calls_correct_url(rag_stub):
 
     async with aiohttp.ClientSession() as session:
         resp = await rag_delete(session, rag, "p1", "f1")
-        await resp.read()
+        assert resp.status == 200
 
     assert len(call_log) == 1
     assert call_log[0]["method"] == "DELETE"
@@ -123,7 +122,7 @@ async def test_rag_get_file_sends_auth_header(rag_stub):
 
     async with aiohttp.ClientSession() as session:
         resp = await rag_get_file(session, rag, "p1", "f1")
-        await resp.read()
+        assert resp.status == 200
 
     assert len(call_log) == 1
     auth_header = call_log[0]["headers"].get("Authorization")
