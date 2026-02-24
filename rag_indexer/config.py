@@ -1,5 +1,9 @@
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 EXCHANGE_NAME = os.getenv("EXCHANGE_NAME", "rag.index.topic")
 ROUTING_KEY = os.getenv("ROUTING_KEY", "rag.index.*")
