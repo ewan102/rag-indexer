@@ -1,5 +1,6 @@
 import os
 
+import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -55,6 +56,7 @@ DLQ_NAME = os.getenv("DLQ_NAME", "rag.index.dlq")
 
 CONCURRENCY = int(os.getenv("CONCURRENCY", "1"))
 
-HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "60"))
+_HTTP_TIMEOUT_SECONDS = int(os.getenv("HTTP_TIMEOUT", "60"))
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SECONDS)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

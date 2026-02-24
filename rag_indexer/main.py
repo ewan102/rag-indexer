@@ -48,8 +48,7 @@ async def main():
 
         health_runner = await start_health_server(connection)
 
-        session_timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT + 5)
-        session = aiohttp.ClientSession(timeout=session_timeout)
+        session = aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
 
         semaphore = asyncio.Semaphore(CONCURRENCY)
         in_flight: set[asyncio.Task] = set()
