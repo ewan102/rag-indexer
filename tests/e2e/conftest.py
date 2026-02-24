@@ -111,9 +111,13 @@ def _make_rag_stub_app(state: RagStubState) -> web.Application:
 
 # ---------- Fixtures ----------
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def rag_stub():
-    """Start a stateful RAG stub server, yield (server, state), close on teardown."""
+    """Start a stateful RAG stub server, yield (server, state), close on teardown.
+
+    Module-scoped so that state persists across ordered tests (e.g. upsert
+    followed by idempotent skip followed by update).
+    """
     state = RagStubState()
     app = _make_rag_stub_app(state)
     server = TestServer(app)
@@ -122,7 +126,7 @@ async def rag_stub():
     await server.close()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def rag_base_url(request, rag_stub):
     """Return the RAG base URL — stub by default, live with ``--e2e-live``."""
     if request.config.getoption("--e2e-live"):
@@ -143,7 +147,7 @@ def rag_base_url(request, rag_stub):
     return str(server.make_url(""))
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def rag_state(request, rag_stub):
     """Return the RagStubState for assertion; skip when running live."""
     if request.config.getoption("--e2e-live"):
@@ -178,7 +182,7 @@ def rabbitmq_url(docker_ip, docker_services):
     return url
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def rmq(require_docker, rabbitmq_url):
     """Connect to RabbitMQ, declare E2E exchange/queue, purge, yield, cleanup."""
     connection = await aio_pika.connect(rabbitmq_url)
