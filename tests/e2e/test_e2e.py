@@ -84,3 +84,58 @@ async def test_update_existing_file(rmq, rag_base_url, rag_state):
             assert resp.status == 200
             data = await resp.json()
             assert data["metadata"]["version"] == new_md5
+
+
+async def test_delete_file(rmq, rag_base_url):
+    """Delete existing file -> consumer DELETEs in RAG -> file gone."""
+    channel, exchange, queue = rmq
+    headers = {
+        "action": "delete",
+        "partition": "e2e-test-auto",
+        "file_id": "doc-1",
+        "rag_base_url": rag_base_url,
+        "rag_api_key": "",
+    }
+
+    await publish_msg(exchange, b"", headers)
+    await consume_and_process(queue, rag_base_url)
+
+    # Verify file is gone
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{rag_base_url}/partition/e2e-test-auto/file/doc-1") as resp:
+            assert resp.status == 404
+
+
+async def test_delete_nonexistent(rmq, rag_base_url):
+    """Delete non-existent file -> 404 treated as success (idempotent)."""
+    channel, exchange, queue = rmq
+    headers = {
+        "action": "delete",
+        "partition": "e2e-test-auto",
+        "file_id": "no-such-file",
+        "rag_base_url": rag_base_url,
+        "rag_api_key": "",
+    }
+
+    await publish_msg(exchange, b"", headers)
+    # Should not raise — 404 is treated as success
+    await consume_and_process(queue, rag_base_url)
+
+
+async def test_transient_error_on_unreachable_rag(rmq):
+    """Unreachable RAG URL -> TransientError raised."""
+    channel, exchange, queue = rmq
+    body = b"some data"
+    headers = {
+        "action": "upsert",
+        "partition": "e2e-test-auto",
+        "file_id": "fail-doc",
+        "md5sum": _md5(body),
+        "content_type": "text/plain",
+        "rag_base_url": "http://localhost:1",
+        "rag_api_key": "",
+    }
+
+    await publish_msg(exchange, body, headers)
+    with pytest.raises(TransientError, match="[Nn]etwork error|[Cc]onnect"):
+        await consume_and_process(queue, "http://localhost:1")
