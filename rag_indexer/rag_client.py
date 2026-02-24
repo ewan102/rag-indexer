@@ -93,7 +93,7 @@ async def rag_upsert(
     msg: IndexMessage,
     file: bytes,
     is_new: bool
-) -> aiohttp.ClientResponse:
+) -> None:
 
     form = FormData()
     rag = msg.rag
