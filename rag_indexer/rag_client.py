@@ -1,6 +1,7 @@
 import asyncio
 import json
-from typing import Dict, Any
+from dataclasses import dataclass
+from typing import Any, Dict
 
 import aiohttp
 import structlog
@@ -13,24 +14,41 @@ from rag_indexer.errors import TransientError, FatalError
 log = structlog.get_logger()
 
 
+@dataclass
+class RagResponse:
+    status: int
+    text: str = ""
+    json_data: dict[str, Any] | None = None
+
+
 async def rag_get_file(
     session: aiohttp.ClientSession, rag: RagConn, partition: str, file_id: str
-) -> aiohttp.ClientResponse:
+) -> RagResponse:
     log.debug("rag_api_call", method="GET", endpoint="file")
     url = f"{rag.base_url}/partition/{partition}/file/{file_id}"
-    return await session.get(
+    async with session.get(
         url, headers={"Authorization": f"Bearer {rag.api_key}"}, timeout=HTTP_TIMEOUT
-    )
+    ) as resp:
+        text = await resp.text()
+        json_data = None
+        if resp.status == 200:
+            try:
+                json_data = json.loads(text)
+            except ValueError:
+                pass
+        return RagResponse(status=resp.status, text=text, json_data=json_data)
 
 
 async def rag_delete(
     session: aiohttp.ClientSession, rag: RagConn, partition: str, file_id: str
-) -> aiohttp.ClientResponse:
+) -> RagResponse:
     log.debug("rag_api_call", method="DELETE", endpoint="file")
     url = f"{rag.base_url}/indexer/partition/{partition}/file/{file_id}"
-    return await session.delete(
+    async with session.delete(
         url, headers={"Authorization": f"Bearer {rag.api_key}"}, timeout=HTTP_TIMEOUT
-    )
+    ) as resp:
+        text = await resp.text()
+        return RagResponse(status=resp.status, text=text)
 
 
 async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -> bytes:

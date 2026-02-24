@@ -67,16 +67,11 @@ async def process_message(
         # DELETE path
         if msg.action == "delete":
             resp = await rag_client.rag_delete(session, msg.rag, msg.partition, msg.file_id)
-            # 2xx or 404 -> OK (idempotent)
             if 200 <= resp.status < 300 or resp.status == 404:
-                await resp.read()
                 return
-            # 429 or 5xx -> retry
-            text = await resp.text()
             if resp.status == 429 or resp.status >= 500:
-                raise TransientError(f"RAG delete {resp.status}: {text}")
-            # other 4xx -> non-retry (e.g. 401/403 -> config)
-            raise FatalError(f"RAG delete {resp.status}: {text}")
+                raise TransientError(f"RAG delete {resp.status}: {resp.text}")
+            raise FatalError(f"RAG delete {resp.status}: {resp.text}")
 
         # UPSERT path
         if msg.action == "upsert":
@@ -85,24 +80,21 @@ async def process_message(
             resp = await rag_client.rag_get_file(session, msg.rag, msg.partition, msg.file_id)
             if resp.status == 429 or resp.status >= 500:
                 log.debug("rag_get_error", status=resp.status)
-                text = await resp.text()
-                raise TransientError(f"RAG GET {resp.status}: {text}")
+                raise TransientError(f"RAG GET {resp.status}: {resp.text}")
 
             need_index = False
             is_new = False
             if resp.status == 200:
-                doc = await resp.json()
+                doc = resp.json_data or {}
                 doc_metadata = (doc.get("metadata") or {}) if isinstance(doc, dict) else {}
-                version_remote = doc_metadata.get("version") or doc_metadata.get("md5sum") # retro compat
+                version_remote = doc_metadata.get("version") or doc_metadata.get("md5sum")  # retro compat
                 if not version_remote or (msg.version and version_remote != msg.version):
                     need_index = True
             elif resp.status == 404:
                 need_index = True
                 is_new = True
             else:
-                # other 4xx -> non-retry (bad auth/config)
-                text = await resp.text()
-                raise FatalError(f"RAG GET {resp.status}: {text}")
+                raise FatalError(f"RAG GET {resp.status}: {resp.text}")
 
             if not need_index:
                 return  # rien a faire

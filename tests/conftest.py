@@ -5,20 +5,11 @@ import pytest
 # Helpers & fakes
 # ------------------------
 class FakeResp:
+    """Mimics RagResponse returned by rag_get_file / rag_delete."""
     def __init__(self, status: int, json_data=None, text_data=""):
         self.status = status
-        self._json = json_data
-        self._text = text_data
-
-    async def json(self):
-        return self._json
-
-    async def text(self):
-        return self._text
-
-    async def read(self):
-        # le consumer attend parfois un "read()" pour vider le flux
-        return b""
+        self.json_data = json_data
+        self.text = text_data
 
 
 class FakeContextResp:
