@@ -49,6 +49,7 @@ async def process_message(
             file_id=headers.get("file_id"),
             doctype=headers.get("doctype"),
             version=headers.get("version"),
+            md5sum=headers.get("md5sum"),
             name=headers.get("name"),
             dir_id=headers.get("dir_id"),
             datetime=headers.get("datetime"),
@@ -88,7 +89,8 @@ async def process_message(
                 doc = resp.json_data or {}
                 doc_metadata = (doc.get("metadata") or {}) if isinstance(doc, dict) else {}
                 version_remote = doc_metadata.get("version") or doc_metadata.get("md5sum")  # retro compat
-                if not version_remote or (msg.version and version_remote != msg.version):
+                version_local = msg.version or msg.md5sum
+                if not version_remote or (version_local and version_remote != version_local):
                     need_index = True
             elif resp.status == 404:
                 need_index = True
