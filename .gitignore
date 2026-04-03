@@ -67,5 +67,7 @@ docs/_build/
 
 data/
 
-# --- GSD planning docs (local-only) ---
+# --- AI stuff ---
 .planning/
+docs/superpowers/
+CLAUDE.md
