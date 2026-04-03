@@ -10,7 +10,7 @@ from aiormq import AMQPConnectionError
 from pydantic import ValidationError
 from structlog.contextvars import clear_contextvars, bind_contextvars
 
-from rag_indexer.config import RABBITMQ_URL, HTTP_TIMEOUT, CONCURRENCY
+from rag_indexer.config import RABBITMQ_URL, HTTP_TIMEOUT, CONCURRENCY, HEALTH_PORT
 from rag_indexer.errors import TransientError, FatalError
 from rag_indexer.logging import setup_logging
 from rag_indexer.metrics import MESSAGES_TOTAL, PROCESSING_DURATION
@@ -46,7 +46,7 @@ async def main():
 
         queue = await declare_topology(channel)
 
-        health_runner = await start_health_server(connection)
+        health_runner = await start_health_server(connection, port=HEALTH_PORT)
 
         session = aiohttp.ClientSession(timeout=HTTP_TIMEOUT)
 

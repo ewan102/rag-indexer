@@ -60,3 +60,5 @@ _HTTP_TIMEOUT_SECONDS = int(os.getenv("HTTP_TIMEOUT", "60"))
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SECONDS)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8080"))
