@@ -124,12 +124,11 @@ async def rag_upsert(
     if msg.md5sum:
         params["md5sum"] = msg.md5sum
 
-    # POST (new) vs PUT (update) est decide apres GET d'exist. ci-dessous
-    # Ici on ne choisit pas encore l'URL exacte; on la construit dans le flow principal
+    # POST (new) vs PUT (update) is decided after the existence GET above
     url_base = f"{rag.base_url}/indexer/partition/{msg.partition}/file/{msg.file_id}"
 
     method = "POST" if is_new else "PUT"
-    headers = {"Authorization": f"Bearer {msg.rag.api_key}"}
+    headers = {"Authorization": f"Bearer {msg.rag.api_key}", "Origin": rag.base_url}
 
     log.debug("rag_api_call", method=method, endpoint="indexer")
     async with session.request(
@@ -140,7 +139,7 @@ async def rag_upsert(
         headers=headers,
         timeout=HTTP_TIMEOUT,
     ) as resp:
-        # lecture pour vider le flux (evite connexion occupee)
+        # read body to drain the connection
         resp_text = await resp.text()
         if resp.status == 429 or resp.status >= 500:
             raise TransientError(f"RAG {method} {resp.status}: {resp_text}")

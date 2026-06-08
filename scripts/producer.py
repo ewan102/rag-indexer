@@ -17,10 +17,10 @@ load_dotenv(dotenv_path=".env")
 # ---------- Config via env ----------
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 EXCHANGE_NAME = os.getenv("EXCHANGE_NAME", "rag.index.topic")
-# La queue principale est bindée sur "rag.index.*", et les retries renvoient sur "rag.index.file"
+# Main queue is bound to "rag.index.*", retries re-route to "rag.index.file"
 ROUTING_KEY = os.getenv("ROUTING_KEY", "rag.index.file")
 
-# Champs RAG (peuvent aussi être passés en CLI)
+# RAG fields (can also be passed via CLI)
 RAG_BASE_URL = os.getenv("RAG_BASE_URL", "")
 RAG_API_KEY = os.getenv("RAG_API_KEY", "")
 
@@ -98,7 +98,7 @@ async def publish_message(
 
     async with connection:
         channel = await connection.channel()
-        # Déclarer l'exchange pour être sûr (topic comme côté consumer)
+        # Declare exchange to be safe (topic, same as consumer side)
         ex = await channel.declare_exchange(
             EXCHANGE_NAME, ExchangeType.TOPIC, durable=True
         )
@@ -106,7 +106,7 @@ async def publish_message(
         msg = Message(
             body=body or b"",
             headers=headers,
-            delivery_mode=DeliveryMode.PERSISTENT,  # messages persistants
+            delivery_mode=DeliveryMode.PERSISTENT,  # persistent messages
         )
 
         await ex.publish(msg, routing_key=routing_key)
@@ -114,7 +114,7 @@ async def publish_message(
 
 # ---------- Subcommands ----------
 async def cmd_upsert_file(args: argparse.Namespace) -> None:
-    # Lecture du fichier (ou stdin)
+    # Read file (or stdin)
     if args.path == "-":
         data = sys.stdin.buffer.read()
         filename = args.name or f"{args.file_id}.bin"
@@ -138,7 +138,7 @@ async def cmd_upsert_file(args: argparse.Namespace) -> None:
         dir_id=args.dir_id,
         dt=args.datetime,
         content_type=content_type,
-        # Pas de file_url/file_bearer ici : on envoie le binaire dans le body
+        # No file_url/file_bearer here: binary is sent in the body
     )
 
     await publish_message(routing_key=args.routing_key, headers=headers, body=data)
@@ -146,9 +146,9 @@ async def cmd_upsert_file(args: argparse.Namespace) -> None:
 
 
 async def cmd_upsert_url(args: argparse.Namespace) -> None:
-    # Ici on ne met pas de body; le consumer téléchargera via file_url
+    # No body here; consumer will download via file_url
     if not args.file_url:
-        print("--file-url est requis pour upsert-url", file=sys.stderr)
+        print("--file-url is required for upsert-url", file=sys.stderr)
         sys.exit(2)
 
     headers = build_headers(
@@ -178,7 +178,7 @@ async def cmd_delete(args: argparse.Namespace) -> None:
         file_id=args.file_id,
         rag_base_url=args.rag_base_url or RAG_BASE_URL,
         rag_api_key=args.rag_api_key or RAG_API_KEY,
-        # les autres headers sont facultatifs
+        # other headers are optional
     )
     await publish_message(routing_key=args.routing_key, headers=headers, body=b"")
     print(f"Published delete for {args.file_id} on {args.partition}")
@@ -186,45 +186,45 @@ async def cmd_delete(args: argparse.Namespace) -> None:
 
 def make_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="RAG indexer producer (compatible avec le consumer aio-pika)."
+        description="RAG indexer producer (compatible with the aio-pika consumer)."
     )
     p.add_argument(
         "--routing-key",
         default=ROUTING_KEY,
         help="Routing key (default: rag.index.file)",
     )
-    p.add_argument("--partition", required=True, help="Partition utilisateur/tenant")
-    p.add_argument("--file-id", required=True, help="Identifiant logique du fichier")
-    p.add_argument("--rag-base-url", help="Override RAG base URL (sinon RAG_BASE_URL)")
-    p.add_argument("--rag-api-key", help="Override RAG API key (sinon RAG_API_KEY)")
-    p.add_argument("--doctype", help="Type documentaire (facultatif)")
-    p.add_argument("--md5sum", help="MD5 attendu (si absent et upsert-file : calculé)")
-    p.add_argument("--name", help="Nom/filename d’affichage")
-    p.add_argument("--dir-id", help="Répertoire parent (optionnel)")
-    p.add_argument("--datetime", help="Datetime ISO (optionnel)")
+    p.add_argument("--partition", required=True, help="User/tenant partition")
+    p.add_argument("--file-id", required=True, help="Logical file identifier")
+    p.add_argument("--rag-base-url", help="Override RAG base URL (fallback: RAG_BASE_URL)")
+    p.add_argument("--rag-api-key", help="Override RAG API key (fallback: RAG_API_KEY)")
+    p.add_argument("--doctype", help="Document type (optional)")
+    p.add_argument("--md5sum", help="Expected MD5 (computed from file if absent for upsert-file)")
+    p.add_argument("--name", help="Display name/filename")
+    p.add_argument("--dir-id", help="Parent directory (optional)")
+    p.add_argument("--datetime", help="ISO datetime (optional)")
     p.add_argument(
-        "--content-type", help="Content-Type (sinon déduit pour upsert-file)"
+        "--content-type", help="Content-Type (inferred from file for upsert-file)"
     )
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # upsert-file
     spf = sub.add_parser(
-        "upsert-file", help="Envoyer un binaire directement dans le body"
+        "upsert-file", help="Send a binary directly in the body"
     )
-    spf.add_argument("path", help="Chemin du fichier ou '-' pour stdin")
+    spf.add_argument("path", help="File path or '-' for stdin")
     spf.set_defaults(func=cmd_upsert_file)
 
     # upsert-url
-    spu = sub.add_parser("upsert-url", help="Laisser le consumer télécharger via URL")
-    spu.add_argument("--file-url", required=True, help="URL du fichier à télécharger")
+    spu = sub.add_parser("upsert-url", help="Let the consumer download via URL")
+    spu.add_argument("--file-url", required=True, help="URL of the file to download")
     spu.add_argument(
-        "--file-bearer", help="Bearer à utiliser par le consumer pour télécharger"
+        "--file-bearer", help="Bearer token for the consumer to use when downloading"
     )
     spu.set_defaults(func=cmd_upsert_url)
 
     # delete
-    spd = sub.add_parser("delete", help="Supprimer un fichier indexé")
+    spd = sub.add_parser("delete", help="Delete an indexed file")
     spd.set_defaults(func=cmd_delete)
 
     return p

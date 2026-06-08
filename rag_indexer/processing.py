@@ -58,7 +58,7 @@ async def process_message(
                 base_url=headers.get("rag_base_url", ""),
                 api_key=headers.get("rag_api_key", ""),
             ),
-            # content.file reste None: le binaire est dans `body`
+            # content.file stays None: binary is in `body`
             content=ContentSpec(
                 file_url=headers.get("file_url"),
                 file_bearer=headers.get("file_bearer"),
@@ -99,7 +99,7 @@ async def process_message(
                 raise FatalError(f"RAG GET {resp.status}: {resp.text}")
 
             if not need_index:
-                return  # rien a faire
+                return  # nothing to do
 
             # 2) Build multipart & send
             return await rag_client.rag_upsert(session, msg, body_bytes, is_new)
