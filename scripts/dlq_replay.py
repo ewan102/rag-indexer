@@ -76,8 +76,9 @@ async def cmd_list(args: argparse.Namespace) -> None:
         channel = await connection.channel()
         queue = await channel.declare_queue(DLQ_NAME, passive=True)
 
+        total = queue.declaration_result.message_count
         count = 0
-        while True:
+        for _ in range(total):
             msg = await queue.get(no_ack=False, fail=False)
             if msg is None:
                 break
@@ -114,14 +115,7 @@ async def cmd_replay(args: argparse.Namespace) -> None:
         exchange = await channel.declare_exchange(EXCHANGE_NAME, passive=True)
 
         if args.all:
-            # First pass: count messages
-            messages_count = 0
-            while True:
-                msg = await queue.get(no_ack=False, fail=False)
-                if msg is None:
-                    break
-                await msg.nack(requeue=True)
-                messages_count += 1
+            messages_count = queue.declaration_result.message_count
 
             if messages_count == 0:
                 print("No messages in DLQ", file=sys.stderr)
