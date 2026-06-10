@@ -82,7 +82,6 @@ async def cmd_list(args: argparse.Namespace) -> None:
             msg = await queue.get(no_ack=False, fail=False)
             if msg is None:
                 break
-
             headers = _serialize_headers(msg.headers or {})
             info = {
                 "message_id": msg.message_id,
@@ -93,9 +92,7 @@ async def cmd_list(args: argparse.Namespace) -> None:
                 "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
             }
             print(json.dumps(info))
-            await msg.nack(requeue=True)
             count += 1
-
         print(json.dumps({"total": count}), file=sys.stderr)
 
 
@@ -114,22 +111,20 @@ async def cmd_replay(args: argparse.Namespace) -> None:
         queue = await channel.declare_queue(DLQ_NAME, passive=True)
         exchange = await channel.declare_exchange(EXCHANGE_NAME, passive=True)
 
-        if args.all:
-            messages_count = queue.declaration_result.message_count
+        total = queue.declaration_result.message_count
 
-            if messages_count == 0:
+        if args.all:
+            if total == 0:
                 print("No messages in DLQ", file=sys.stderr)
                 return
 
-            # Prompt for confirmation
-            answer = input(f"Replay all {messages_count} messages? [y/N] ").strip().lower()
+            answer = input(f"Replay all {total} messages? [y/N] ").strip().lower()
             if answer != "y":
                 print("Aborted", file=sys.stderr)
                 return
 
-            # Second pass: replay all
             replayed = 0
-            while True:
+            for _ in range(total):
                 msg = await queue.get(no_ack=False, fail=False)
                 if msg is None:
                     break
@@ -148,10 +143,9 @@ async def cmd_replay(args: argparse.Namespace) -> None:
             print(json.dumps({"total_replayed": replayed}), file=sys.stderr)
 
         else:
-            # Single replay by file_id
             found = False
             checked = 0
-            while True:
+            for _ in range(total):
                 msg = await queue.get(no_ack=False, fail=False)
                 if msg is None:
                     break
@@ -170,9 +164,7 @@ async def cmd_replay(args: argparse.Namespace) -> None:
                     print(json.dumps(info))
                     found = True
                     break
-                else:
-                    await msg.nack(requeue=True)
-                    checked += 1
+                checked += 1
 
             if not found:
                 print(f"No message found with file_id={args.file_id} (checked {checked} messages)", file=sys.stderr)
