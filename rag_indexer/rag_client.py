@@ -115,6 +115,11 @@ async def rag_upsert(
 
     form.add_field("metadata", json.dumps(meta))
 
+    # Forward the cozy callback URL so OpenRAG can POST the async indexing status.
+    # Absent until cozy wires it up -- skip silently to keep current behavior.
+    if msg.callback_url:
+        form.add_field("callback_url", msg.callback_url)
+
     # query params. TODO: check it is useful, should not
     params = {}
     if msg.dir_id:

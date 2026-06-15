@@ -1,6 +1,7 @@
 import asyncio
 
 import aio_pika
+import aiohttp
 import structlog
 from aio_pika import ExchangeType, Message, DeliveryMode
 from aiohttp import web
@@ -64,8 +65,14 @@ async def publish_to_retry(
 async def publish_to_dlq(
     channel: aio_pika.Channel,
     original_msg: aio_pika.IncomingMessage,
+    session: aiohttp.ClientSession,
 ) -> None:
-    """Publish message copy to the dead letter queue."""
+    """Publish message copy to the dead letter queue.
+
+    After the message safely lands in the DLQ, best-effort notify the cozy
+    callback (if a `callback_url` header is present) that indexing failed.
+    """
+    # Republish to the DLQ FIRST -- the message must reach the DLQ no matter what.
     await channel.default_exchange.publish(
         Message(
             original_msg.body,
@@ -75,6 +82,26 @@ async def publish_to_dlq(
         ),
         routing_key=DLQ_NAME,
     )
+
+    # Best-effort failure callback to cozy-stack -- must never block or fail the DLQ publish.
+    headers = original_msg.headers or {}
+    callback_url = headers.get("callback_url")
+    if not callback_url:
+        # Old messages / tests without a callback header: nothing to notify.
+        log.debug("dlq_callback_skipped", reason="no_callback_url")
+        return
+
+    payload = {
+        "partition": headers.get("partition"),
+        "file_id": headers.get("file_id"),
+        "status": "failed",
+    }
+    try:
+        async with session.post(callback_url, json=payload) as resp:
+            resp.raise_for_status()
+        log.info("dlq_callback_sent", callback_url=callback_url)
+    except Exception as e:
+        log.warning("dlq_callback_failed", callback_url=callback_url, error=str(e))
 
 
 # ---------- Topology declaration ----------

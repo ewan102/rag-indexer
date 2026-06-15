@@ -58,7 +58,8 @@ def _make_rag_stub_app(state: RagStubState) -> web.Application:
         partition = request.match_info["partition"]
         file_id = request.match_info["file_id"]
         key = (partition, file_id)
-        state.call_log.append({"method": "POST", "partition": partition, "file_id": file_id})
+        log_entry = {"method": "POST", "partition": partition, "file_id": file_id}
+        state.call_log.append(log_entry)
         if key in state.files:
             return web.json_response({"detail": "Already exists"}, status=409)
         metadata = {}
@@ -67,6 +68,8 @@ def _make_rag_stub_app(state: RagStubState) -> web.Application:
             if part.name == "metadata":
                 raw = await part.read(decode=True)
                 metadata = json.loads(raw)
+            elif part.name == "callback_url":
+                log_entry["callback_url"] = (await part.read(decode=True)).decode()
             elif part.name == "file":
                 # consume to avoid hanging
                 await part.read(decode=False)
