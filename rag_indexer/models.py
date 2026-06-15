@@ -26,5 +26,6 @@ class IndexMessage(BaseModel):
     datetime: Optional[str] = None
     content_type: Optional[str] = None
     app_metadata: Optional[dict] = None
+    callback_url: Optional[str] = None
     rag: RagConn
     content: Optional[ContentSpec] = None

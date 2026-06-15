@@ -85,7 +85,7 @@ async def main():
                             MESSAGES_TOTAL.labels(action=action, status="dlq", partition=partition).inc()
                             PROCESSING_DURATION.labels(action=action).observe(duration)
                             log.error("message_invalid_payload", error=str(ve))
-                            await publish_to_dlq(channel, message)
+                            await publish_to_dlq(channel, message, session)
 
                         except TransientError as te:
                             duration = time.monotonic() - start_time
@@ -98,14 +98,14 @@ async def main():
                             else:
                                 MESSAGES_TOTAL.labels(action=action, status="dlq", partition=partition).inc()
                                 log.warning("message_dlq_exhausted", attempts=retry_count)
-                                await publish_to_dlq(channel, message)
+                                await publish_to_dlq(channel, message, session)
 
                         except FatalError as fe:
                             duration = time.monotonic() - start_time
                             MESSAGES_TOTAL.labels(action=action, status="dlq", partition=partition).inc()
                             PROCESSING_DURATION.labels(action=action).observe(duration)
                             log.error("message_fatal", error=str(fe))
-                            await publish_to_dlq(channel, message)
+                            await publish_to_dlq(channel, message, session)
 
                 except Exception:
                     # Final safety net -- no exception may escape handle_message

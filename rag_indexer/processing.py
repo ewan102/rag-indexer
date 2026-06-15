@@ -38,7 +38,7 @@ async def process_message(
 
     try:
         body_bytes = message.body
-        headers = message.headers
+        headers = message.headers or {}
 
         # payload = json.loads(body.decode("utf-8"))
         # msg = IndexMessage.model_validate(payload)
@@ -54,6 +54,7 @@ async def process_message(
             dir_id=headers.get("dir_id"),
             datetime=headers.get("datetime"),
             content_type=headers.get("content_type"),
+            callback_url=headers.get("callback_url"),
             rag=RagConn(
                 base_url=headers.get("rag_base_url", ""),
                 api_key=headers.get("rag_api_key", ""),

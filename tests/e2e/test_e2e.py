@@ -50,6 +50,24 @@ async def test_upsert_new_file(rmq, rag_base_url, rag_state):
             assert data["metadata"]["version"] == md5
 
 
+async def test_upsert_forwards_callback_url(rmq, rag_base_url, rag_state):
+    """Upsert with a callback_url header -> forwarded to RAG as a form field."""
+    channel, exchange, queue = rmq
+    body = b"Document with a status callback."
+    md5 = _md5(body)
+    callback_url = "https://cozy.example/status/cb-1"
+    headers = _make_upsert_headers("e2e-test-auto", "doc-cb", md5, rag_base_url)
+    headers["callback_url"] = callback_url
+
+    await publish_msg(exchange, body, headers)
+    await consume_and_process(queue, rag_base_url)
+
+    # File stored AND the callback_url reached the RAG stub as a form field.
+    posts = [c for c in rag_state.call_log if c["method"] == "POST" and c["file_id"] == "doc-cb"]
+    assert posts, "Expected a POST for doc-cb"
+    assert posts[-1].get("callback_url") == callback_url
+
+
 async def test_idempotent_skip(rmq, rag_base_url, rag_state):
     """Same file+md5 sent again -> consumer skips (no PUT)."""
     channel, exchange, queue = rmq
