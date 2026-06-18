@@ -1,5 +1,3 @@
-from typing import Optional
-
 from pydantic import BaseModel
 
 
@@ -9,23 +7,23 @@ class RagConn(BaseModel):
 
 
 class ContentSpec(BaseModel):
-    note_markdown: Optional[str] = None
-    file_url: Optional[str] = None
-    file_bearer: Optional[str] = None
+    note_markdown: str | None = None
+    file_url: str | None = None
+    file_bearer: str | None = None
 
 
 class IndexMessage(BaseModel):
     action: str  # "upsert" | "delete"
     partition: str
     file_id: str
-    doctype: Optional[str] = None
-    version: Optional[str] = None
-    md5sum: Optional[str] = None
-    name: Optional[str] = None
-    dir_id: Optional[str] = None
-    datetime: Optional[str] = None
-    content_type: Optional[str] = None
-    app_metadata: Optional[dict] = None
-    callback_url: Optional[str] = None
+    doctype: str | None = None
+    version: str | None = None
+    md5sum: str | None = None
+    name: str | None = None
+    dir_id: str | None = None
+    datetime: str | None = None
+    content_type: str | None = None
+    app_metadata: dict | None = None
+    callback_url: str | None = None
     rag: RagConn
-    content: Optional[ContentSpec] = None
+    content: ContentSpec | None = None

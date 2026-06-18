@@ -1,13 +1,27 @@
 """E2E tests: full pipeline through RabbitMQ -> consumer -> RAG API."""
 
+import asyncio
 import hashlib
+import json
 
 import aiohttp
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+from aio_pika import Message, DeliveryMode
 
+from rag_indexer.config import DLQ_NAME
 from rag_indexer.errors import TransientError
+from rag_indexer.processing import extract_metadata, get_retry_count
+from rag_indexer.transport import publish_to_dlq
 
-from tests.e2e.conftest import publish_msg, consume_and_process
+from tests.e2e.conftest import (
+    publish_msg,
+    consume_and_process,
+    consume_and_process_cozy_json,
+    publish_cozy_json_msg,
+    TESTFILE_CONTENT,
+)
 
 pytestmark = [
     pytest.mark.usefixtures("require_docker"),
@@ -157,3 +171,141 @@ async def test_transient_error_on_unreachable_rag(rmq):
     await publish_msg(exchange, body, headers)
     with pytest.raises(TransientError, match="[Nn]etwork error|[Cc]onnect"):
         await consume_and_process(queue, "http://localhost:1")
+
+
+# ---------------------------------------------------------------------------
+# Cozy-json format tests
+# ---------------------------------------------------------------------------
+
+async def test_cozy_json_happy_path(rmq, rag_base_url, rag_state):
+    """Cozy-json format: all business fields in JSON body, AMQP headers empty.
+
+    Verifies that extract_metadata reads from the body JSON and that the consumer
+    builds IndexMessage correctly, then forwards callback_url to OpenRAG.
+    """
+    channel, exchange, queue = rmq
+    callback_url = "https://cozy.example/status/cozy-json-happy"
+    md5 = _md5(TESTFILE_CONTENT)
+
+    await publish_cozy_json_msg(
+        exchange,
+        rag_base_url,
+        partition="e2e-cozy-json",
+        file_id="cozy-happy-doc",
+        md5sum=md5,
+        callback_url=callback_url,
+    )
+
+    await consume_and_process_cozy_json(queue)
+
+    # File stored in RAG with correct version
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{rag_base_url}/partition/e2e-cozy-json/file/cozy-happy-doc") as resp:
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["metadata"]["version"] == md5
+
+    # callback_url was forwarded to OpenRAG as a multipart form field
+    posts = [c for c in rag_state.call_log if c["method"] == "POST" and c["file_id"] == "cozy-happy-doc"]
+    assert posts, "Expected a POST for cozy-happy-doc"
+    assert posts[-1].get("callback_url") == callback_url
+
+
+async def test_cozy_json_dlq_fail(rmq, rag_base_url):
+    """Cozy-json format + DLQ: publish_to_dlq reads callback_url/partition/file_id from body.
+
+    Verifies that:
+    - The failed-status POST is sent to the callback_url found in the JSON body.
+    - The DLQ message body is the original JSON (wire format preserved).
+    """
+    channel, exchange, queue = rmq
+
+    # Start an in-process callback stub to capture the failed-status POST.
+    callback_received = []
+
+    async def _callback(request: web.Request) -> web.Response:
+        callback_received.append(await request.json())
+        return web.Response(status=200)
+
+    stub_app = web.Application()
+    stub_app.router.add_post("/cb-dlq", _callback)
+    callback_server = TestServer(stub_app)
+    await callback_server.start_server()
+
+    try:
+        callback_url = str(callback_server.make_url("/cb-dlq"))
+
+        # Declare a test DLQ queue so publish_to_dlq has somewhere to land.
+        dlq_queue = await channel.declare_queue(DLQ_NAME, durable=False, auto_delete=True)
+
+        body_json = await publish_cozy_json_msg(
+            exchange,
+            rag_base_url,
+            partition="e2e-cozy-dlq",
+            file_id="cozy-dlq-doc",
+            callback_url=callback_url,
+        )
+
+        msg = await asyncio.wait_for(queue.get(no_ack=False), timeout=5)
+        async with aiohttp.ClientSession() as session:
+            await publish_to_dlq(channel, msg, session)
+        await msg.ack()
+
+        # Give the async callback POST a moment to complete.
+        await asyncio.sleep(0.2)
+
+        # Failed-status callback was POSTed to callback_url from the JSON body.
+        assert len(callback_received) == 1
+        cb = callback_received[0]
+        assert cb["status"] == "failed"
+        assert cb["partition"] == "e2e-cozy-dlq"
+        assert cb["file_id"] == "cozy-dlq-doc"
+
+        # DLQ message body is the original JSON (body preserved, format intact).
+        dlq_msg = await asyncio.wait_for(dlq_queue.get(no_ack=True), timeout=5)
+        assert dlq_msg.body == body_json
+
+    finally:
+        await callback_server.close()
+
+
+async def test_cozy_json_retry_xdeath_fallback(rmq):
+    """Cozy-json format after retry: x-death AMQP headers don't block body JSON parsing.
+
+    RabbitMQ adds x-death (and related) headers when dead-lettering through TTL retry
+    queues. A naive 'if not headers: parse body' heuristic would silently fall back to
+    the (empty of business fields) AMQP headers and lose all metadata. This test
+    publishes a cozy-json message pre-loaded with realistic x-death headers and verifies
+    that extract_metadata still reads partition/file_id from the JSON body, while
+    get_retry_count still reads x-death from the real AMQP headers.
+    """
+    channel, exchange, queue = rmq
+
+    # Simulate the AMQP headers RabbitMQ adds after one dead-letter cycle.
+    x_death_headers = {
+        "x-death": [{"queue": "rag.index.retry.30s.q", "reason": "expired", "count": 1}],
+        "x-first-death-reason": "expired",
+        "x-first-death-queue": "rag.index.retry.30s.q",
+        "x-first-death-exchange": "rag.index.topic",
+    }
+
+    await publish_cozy_json_msg(
+        exchange,
+        "http://placeholder",  # not used -- test only calls extract_metadata
+        partition="cozy-retry-part",
+        file_id="cozy-retry-file",
+        amqp_headers=x_death_headers,
+    )
+
+    msg = await asyncio.wait_for(queue.get(no_ack=False), timeout=5)
+
+    # Despite non-empty AMQP headers, extract_metadata reads from body JSON
+    # because 'partition' is absent from the AMQP headers.
+    metadata = extract_metadata(msg)
+    assert metadata["partition"] == "cozy-retry-part"
+    assert metadata["file_id"] == "cozy-retry-file"
+
+    # get_retry_count must still read x-death from the real AMQP headers.
+    assert get_retry_count(msg) == 1
+
+    await msg.ack()

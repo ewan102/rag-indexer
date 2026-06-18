@@ -14,7 +14,12 @@ from rag_indexer.config import RABBITMQ_URL, HTTP_TIMEOUT, CONCURRENCY, HEALTH_P
 from rag_indexer.errors import TransientError, FatalError
 from rag_indexer.logging import setup_logging
 from rag_indexer.metrics import MESSAGES_TOTAL, PROCESSING_DURATION
-from rag_indexer.processing import process_message, get_retry_count, next_retry_queue
+from rag_indexer.processing import (
+    process_message,
+    get_retry_count,
+    next_retry_queue,
+    extract_metadata,
+)
 from rag_indexer.transport import (
     declare_topology,
     publish_to_retry,
@@ -26,6 +31,7 @@ from rag_indexer.transport import (
 
 
 async def main():
+    """Entry point: connect to RabbitMQ, declare topology, and start the consumer loop."""
     setup_logging()
     log = structlog.get_logger()
 
@@ -58,11 +64,11 @@ async def main():
             async with semaphore:
                 try:
                     clear_contextvars()
-                    headers = message.headers or {}
-                    action = headers.get("action", "unknown")
-                    partition = headers.get("partition", "unknown")
+                    metadata = extract_metadata(message)
+                    action = metadata.get("action", "unknown")
+                    partition = metadata.get("partition", "unknown")
                     bind_contextvars(
-                        file_id=headers.get("file_id", "unknown"),
+                        file_id=metadata.get("file_id", "unknown"),
                         partition=partition,
                         action=action,
                     )
