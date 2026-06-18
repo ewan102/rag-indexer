@@ -10,9 +10,13 @@ from aio_pika import ExchangeType, Message, DeliveryMode
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from rag_indexer.processing import process_message
+from rag_indexer.processing import process_message, extract_metadata
 from rag_indexer.errors import TransientError, FatalError
 from tests.integration.conftest import _docker_is_available, _amqp_is_responsive
+
+# Static bytes served by the RAG stub's /testfile endpoint, used by cozy-json tests
+# that must provide a file_url for the consumer to download file content.
+TESTFILE_CONTENT = b"cozy-json test file content"
 
 # ---------- E2E namespace constants ----------
 
@@ -104,11 +108,16 @@ def _make_rag_stub_app(state: RagStubState) -> web.Application:
         del state.files[key]
         return web.Response(status=204)
 
+    async def get_testfile(request: web.Request) -> web.Response:
+        """Static file endpoint used by cozy-json tests as file_url target."""
+        return web.Response(body=TESTFILE_CONTENT, content_type="text/plain")
+
     app = web.Application()
     app.router.add_get("/partition/{partition}/file/{file_id}", get_file)
     app.router.add_post("/indexer/partition/{partition}/file/{file_id}", post_file)
     app.router.add_put("/indexer/partition/{partition}/file/{file_id}", put_file)
     app.router.add_delete("/indexer/partition/{partition}/file/{file_id}", delete_file)
+    app.router.add_get("/testfile", get_testfile)
     return app
 
 
@@ -259,3 +268,69 @@ async def consume_and_process(queue, rag_base_url: str) -> None:
             await process_message(patched, session)
     finally:
         await msg.ack()
+
+
+async def consume_and_process_cozy_json(queue) -> None:
+    """Consume one cozy-json message and call process_message() without patching.
+
+    For cozy-json format the rag_base_url is already embedded in the JSON body
+    (set at publish time), so no header patching is needed. Real AMQP headers
+    (e.g. x-death after a retry cycle) are preserved as-is.
+
+    Raises TransientError or FatalError on failure.
+    """
+    msg = await asyncio.wait_for(queue.get(no_ack=False), timeout=5)
+    try:
+        async with aiohttp.ClientSession() as session:
+            await process_message(msg, session)
+    finally:
+        await msg.ack()
+
+
+async def publish_cozy_json_msg(
+    exchange,
+    rag_base_url: str,
+    *,
+    partition: str,
+    file_id: str,
+    action: str = "upsert",
+    md5sum: str = "",
+    name: str = "test.txt",
+    content_type: str = "text/plain",
+    callback_url: str = "",
+    amqp_headers: dict | None = None,
+    **extra,
+) -> bytes:
+    """Publish a cozy-json format message; return the body bytes for assertion.
+
+    All business fields go in the JSON body; AMQP headers are empty by default.
+    Pass amqp_headers to simulate broker-added headers (e.g. x-death after retry).
+    The file_url defaults to {rag_base_url}/testfile so the consumer can fetch
+    TESTFILE_CONTENT without a separate file server.
+    """
+    payload = {
+        "action": action,
+        "partition": partition,
+        "file_id": file_id,
+        "rag_base_url": rag_base_url,
+        "rag_api_key": "e2e-test-key",
+        "file_url": f"{rag_base_url}/testfile",
+        "md5sum": md5sum,
+        "name": name,
+        "content_type": content_type,
+        **extra,
+    }
+    if callback_url:
+        payload["callback_url"] = callback_url
+
+    body_json = json.dumps(payload).encode()
+    await exchange.publish(
+        Message(
+            body=body_json,
+            headers=amqp_headers or {},
+            content_type="application/json",
+            delivery_mode=DeliveryMode.PERSISTENT,
+        ),
+        routing_key="e2e.test.file",
+    )
+    return body_json

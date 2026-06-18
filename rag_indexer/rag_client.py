@@ -1,14 +1,14 @@
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 import aiohttp
 import structlog
 from aiohttp import FormData
 
 from rag_indexer.config import HTTP_TIMEOUT
-from rag_indexer.models import IndexMessage, RagConn, ContentSpec
+from rag_indexer.models import IndexMessage, RagConn
 from rag_indexer.errors import TransientError, FatalError
 
 log = structlog.get_logger()
@@ -75,7 +75,7 @@ async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -
         raise TransientError(f"Network error fetching file_url: {e}") from e
 
 
-def build_metadata(msg: IndexMessage) -> Dict[str, Any]:
+def build_metadata(msg: IndexMessage) -> dict[str, Any]:
     meta = {
         "version": msg.version or msg.md5sum or "",
         "datetime": msg.datetime or "",
@@ -116,11 +116,12 @@ async def rag_upsert(
     form.add_field("metadata", json.dumps(meta))
 
     # Forward the cozy callback URL so OpenRAG can POST the async indexing status.
-    # Absent until cozy wires it up -- skip silently to keep current behavior.
     if msg.callback_url:
         form.add_field("callback_url", msg.callback_url)
+        log.debug("upsert_callback_url_forwarded", callback_url=msg.callback_url)
+    else:
+        log.debug("upsert_callback_url_absent")
 
-    # query params. TODO: check it is useful, should not
     params = {}
     if msg.dir_id:
         params["parent_id"] = msg.dir_id
@@ -129,7 +130,6 @@ async def rag_upsert(
     if msg.md5sum:
         params["md5sum"] = msg.md5sum
 
-    # POST (new) vs PUT (update) is decided after the existence GET above
     url_base = f"{rag.base_url}/indexer/partition/{msg.partition}/file/{msg.file_id}"
 
     method = "POST" if is_new else "PUT"
@@ -144,7 +144,7 @@ async def rag_upsert(
         headers=headers,
         timeout=HTTP_TIMEOUT,
     ) as resp:
-        # read body to drain the connection
+        # read response body to release the connection
         resp_text = await resp.text()
         if resp.status == 429 or resp.status >= 500:
             raise TransientError(f"RAG {method} {resp.status}: {resp_text}")

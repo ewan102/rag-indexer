@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import aio_pika
 import aiohttp
@@ -10,6 +11,47 @@ from rag_indexer.models import IndexMessage, RagConn, ContentSpec
 from rag_indexer.errors import TransientError, FatalError
 
 log = structlog.get_logger()
+
+# Two wire formats coexist:
+#   "headers" format   — all business fields are AMQP message headers (legacy, used by all
+#                        existing producers and tests). Body contains binary file content.
+#   "cozy-json" format — AMQP headers carry only broker-added fields (x-death, …); all
+#                        business fields are JSON-encoded in the body. File content is always
+#                        fetched via file_url. Used when the producer cannot set custom AMQP
+#                        headers (e.g. cozy-stack's shared rabbitmq package).
+#
+# The two formats are transparent to all code above extract_metadata().
+
+
+def extract_metadata(message: aio_pika.IncomingMessage) -> dict:
+    """Return business metadata fields from a message regardless of wire format.
+
+    Detection heuristic:
+    - If 'partition' is present in message.headers → "headers" format, return headers.
+    - Else if body is valid JSON containing 'partition' → "cozy-json" format, return body dict.
+    - Else → return headers as-is (fallback; downstream validation will reject the message).
+
+    Why 'partition' rather than checking for empty headers:
+        RabbitMQ appends x-death, x-first-death-reason, x-first-death-queue, and
+        x-first-death-exchange headers during dead-lettering through TTL retry queues. A
+        cozy-json message that has completed a retry cycle will arrive with non-empty AMQP
+        headers containing only these broker-added fields — no business fields. Checking for
+        the presence of the required business field 'partition' is robust against this.
+    """
+    raw_headers = message.headers or {}
+    if "partition" in raw_headers:
+        return raw_headers  # "headers" format
+
+    try:
+        body = message.body
+        if body:
+            data = json.loads(body.decode("utf-8"))
+            if isinstance(data, dict) and "partition" in data:
+                return data
+    except Exception:
+        pass
+
+    return raw_headers  # fallback: downstream validation will reject this
 
 
 def get_retry_count(message: aio_pika.IncomingMessage) -> int:
@@ -35,13 +77,18 @@ def next_retry_queue(retry_count: int) -> str | None:
 async def process_message(
     message: aio_pika.IncomingMessage, session: aiohttp.ClientSession
 ) -> None:
+    """Validate, route, and execute the indexing action for one message.
 
+    Supports both 'headers' and 'cozy-json' wire formats via extract_metadata().
+    Raises TransientError for retryable failures and FatalError for permanent ones;
+    unexpected exceptions are wrapped as FatalError to prevent infinite retry loops.
+    """
     try:
-        body_bytes = message.body
-        headers = message.headers or {}
-
-        # payload = json.loads(body.decode("utf-8"))
-        # msg = IndexMessage.model_validate(payload)
+        headers = extract_metadata(message)
+        # For cozy-json format the body is the metadata JSON, not file content.
+        # Pass None so rag_upsert falls through to the file_url download path.
+        # For headers format the body is binary file content (or b"" for URL-based upserts).
+        body_bytes = message.body if "partition" in (message.headers or {}) else None
 
         msg = IndexMessage(
             action=headers.get("action", "upsert"),
@@ -59,7 +106,6 @@ async def process_message(
                 base_url=headers.get("rag_base_url", ""),
                 api_key=headers.get("rag_api_key", ""),
             ),
-            # content.file stays None: binary is in `body`
             content=ContentSpec(
                 file_url=headers.get("file_url"),
                 file_bearer=headers.get("file_bearer"),
