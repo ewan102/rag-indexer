@@ -52,13 +52,11 @@ async def rag_delete(
 
 
 async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -> bytes:
-    headers = {}
-    if msg.content.file_bearer:
-        headers["Authorization"] = f"Bearer {msg.content.file_bearer}"
-
+    # The file_url carries its own authentication via the secret in its path
+    # (cozy-stack /files/downloads/<secret>/<filename>); no Authorization header.
     log.debug("file_download", source="file_url")
     try:
-        async with session.get(msg.content.file_url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
+        async with session.get(msg.content.file_url, timeout=HTTP_TIMEOUT) as resp:
             if resp.status == 429 or resp.status >= 500:
                 raise TransientError(f"Failed to fetch file_url ({resp.status})")
             if resp.status >= 400:
@@ -98,7 +96,7 @@ async def rag_upsert(
     form = FormData()
     rag = msg.rag
 
-    # Content source: note_markdown OR file_url download
+    # Content source: in-memory bytes (file param) OR file_url download.
     filename = msg.name or f"{msg.file_id}.bin"
 
     if file is not None:

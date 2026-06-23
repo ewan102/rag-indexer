@@ -142,7 +142,8 @@ async def test_upsert_new_on_404_triggers_post(
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
-    assert calls["upsert"]["file_bytes"] == body
+    # Body is never the file content: rag_upsert fetches it via file_url, so None.
+    assert calls["upsert"]["file_bytes"] is None
     assert calls["upsert"]["is_new"] is True
     # verifie quelques champs du message reconstruit par le consumer
     m = calls["upsert"]["msg"]
@@ -177,7 +178,7 @@ async def test_upsert_update_on_md5_change_triggers_put(
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
-    assert calls["upsert"]["file_bytes"] == body
+    assert calls["upsert"]["file_bytes"] is None
     assert calls["upsert"]["is_new"] is False
 
 
@@ -313,13 +314,13 @@ async def test_missing_file_id_raises_fatal_error(
 
 
 @pytest.mark.asyncio
-async def test_empty_body_upsert_calls_rag_upsert_with_empty_bytes(
+async def test_upsert_passes_none_body_to_rag_upsert(
     monkeypatch, headers_base, aiohttp_session_stub
 ):
-    """Upsert with empty body (b'') but valid headers should NOT be an error.
+    """Upsert always passes body_bytes=None to rag_upsert.
 
-    processing.py passes body_bytes directly to rag_upsert. Verify rag_upsert
-    is called with empty bytes.
+    The message body is never the file content; rag_upsert fetches the file
+    via file_url. So process_message passes None regardless of the body.
     """
     calls = {"upsert": None}
 
@@ -338,7 +339,7 @@ async def test_empty_body_upsert_calls_rag_upsert_with_empty_bytes(
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
-    assert calls["upsert"]["file_bytes"] == b""
+    assert calls["upsert"]["file_bytes"] is None
     assert calls["upsert"]["is_new"] is True
 
 
