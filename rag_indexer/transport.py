@@ -100,7 +100,7 @@ async def publish_to_dlq(
     payload = {
         "partition": metadata.get("partition"),
         "file_id": metadata.get("file_id"),
-        "status": "failed",
+        "indexed": False,
     }
     try:
         async with session.post(callback_url, json=payload) as resp:

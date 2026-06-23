@@ -54,7 +54,6 @@ def build_headers(
     dt: str | None = None,
     content_type: str | None = None,
     file_url: str | None = None,
-    file_bearer: str | None = None,
     callback_url: str | None = None,
 ) -> dict:
     h = {
@@ -78,8 +77,6 @@ def build_headers(
         h["content_type"] = content_type
     if file_url:
         h["file_url"] = file_url
-    if file_bearer:
-        h["file_bearer"] = file_bearer
     if callback_url:
         h["callback_url"] = callback_url
     return h
@@ -188,7 +185,6 @@ async def cmd_upsert_url(args: argparse.Namespace) -> None:
         dt=args.datetime,
         content_type=args.content_type,
         file_url=args.file_url,
-        file_bearer=args.file_bearer,
         callback_url=args.callback_url,
     )
 
@@ -249,9 +245,6 @@ def make_parser() -> argparse.ArgumentParser:
     # upsert-url
     spu = sub.add_parser("upsert-url", help="Let the consumer download via URL")
     spu.add_argument("--file-url", required=True, help="URL of the file to download")
-    spu.add_argument(
-        "--file-bearer", help="Bearer token for the consumer to use when downloading"
-    )
     spu.add_argument(
         "--format", choices=["headers", "cozy-json"], default="headers",
         help="Wire format: 'headers' (default) or 'cozy-json' (all fields in JSON body)",

@@ -216,7 +216,7 @@ async def test_dlq_failed_callback_is_posted(rmq_channel):
 
         # 2) The failure callback was POSTed with the expected body.
         assert received == [
-            {"partition": "user-dlq", "file_id": "doc-dlq", "status": "failed"}
+            {"partition": "user-dlq", "file_id": "doc-dlq", "indexed": False}
         ]
     finally:
         await server.close()

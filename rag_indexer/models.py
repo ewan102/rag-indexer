@@ -9,7 +9,6 @@ class RagConn(BaseModel):
 class ContentSpec(BaseModel):
     note_markdown: str | None = None
     file_url: str | None = None
-    file_bearer: str | None = None
 
 
 class IndexMessage(BaseModel):

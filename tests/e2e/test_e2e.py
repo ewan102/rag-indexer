@@ -21,6 +21,7 @@ from tests.e2e.conftest import (
     consume_and_process_cozy_json,
     publish_cozy_json_msg,
     TESTFILE_CONTENT,
+    E2E_EXCHANGE,
 )
 
 pytestmark = [
@@ -43,6 +44,9 @@ def _make_upsert_headers(partition, file_id, md5sum, rag_base_url, name="test.tx
         "content_type": "text/plain",
         "rag_base_url": rag_base_url,
         "rag_api_key": "",
+        # File content is always fetched via file_url (never sent as a body); the
+        # stub's /testfile endpoint serves TESTFILE_CONTENT.
+        "file_url": f"{rag_base_url}/testfile",
     }
 
 
@@ -257,7 +261,7 @@ async def test_cozy_json_dlq_fail(rmq, rag_base_url):
         # Failed-status callback was POSTed to callback_url from the JSON body.
         assert len(callback_received) == 1
         cb = callback_received[0]
-        assert cb["status"] == "failed"
+        assert cb["indexed"] is False
         assert cb["partition"] == "e2e-cozy-dlq"
         assert cb["file_id"] == "cozy-dlq-doc"
 
@@ -281,31 +285,60 @@ async def test_cozy_json_retry_xdeath_fallback(rmq):
     """
     channel, exchange, queue = rmq
 
-    # Simulate the AMQP headers RabbitMQ adds after one dead-letter cycle.
-    x_death_headers = {
-        "x-death": [{"queue": "rag.index.retry.30s.q", "reason": "expired", "count": 1}],
-        "x-first-death-reason": "expired",
-        "x-first-death-queue": "rag.index.retry.30s.q",
-        "x-first-death-exchange": "rag.index.topic",
-    }
-
-    await publish_cozy_json_msg(
-        exchange,
-        "http://placeholder",  # not used -- test only calls extract_metadata
-        partition="cozy-retry-part",
-        file_id="cozy-retry-file",
-        amqp_headers=x_death_headers,
+    # RabbitMQ clears any client-supplied x-death header (it is broker-managed and
+    # only populated during real dead-lettering). To get a genuine x-death we route
+    # the message through an actual short-TTL queue that dead-letters into the E2E
+    # queue -- exactly what the production retry topology does.
+    retry_q_name = "e2e.test.retry.xdeath.q"
+    await channel.declare_queue(
+        retry_q_name,
+        durable=False,
+        auto_delete=False,
+        arguments={
+            "x-message-ttl": 500,
+            "x-dead-letter-exchange": E2E_EXCHANGE,
+            "x-dead-letter-routing-key": "e2e.test.file",
+        },
     )
 
-    msg = await asyncio.wait_for(queue.get(no_ack=False), timeout=5)
+    # Publish a cozy-json message (business fields in body) into the retry queue.
+    payload = {
+        "action": "upsert",
+        "partition": "cozy-retry-part",
+        "file_id": "cozy-retry-file",
+        "rag_base_url": "http://placeholder",  # not used -- test stops at metadata
+        "rag_api_key": "",
+        "file_url": "http://placeholder/testfile",
+    }
+    body_json = json.dumps(payload).encode()
+    await channel.default_exchange.publish(
+        Message(
+            body=body_json,
+            content_type="application/json",
+            delivery_mode=DeliveryMode.PERSISTENT,
+        ),
+        routing_key=retry_q_name,
+    )
 
-    # Despite non-empty AMQP headers, extract_metadata reads from body JSON
-    # because 'partition' is absent from the AMQP headers.
-    metadata = extract_metadata(msg)
-    assert metadata["partition"] == "cozy-retry-part"
-    assert metadata["file_id"] == "cozy-retry-file"
+    # Wait for the TTL to expire; the broker dead-letters into the E2E queue and
+    # stamps a real x-death entry with reason='expired'.
+    msg = None
+    for _ in range(50):
+        msg = await queue.get(no_ack=False, fail=False)
+        if msg is not None:
+            break
+        await asyncio.sleep(0.1)
+    assert msg is not None, "message was not dead-lettered into the e2e queue"
 
-    # get_retry_count must still read x-death from the real AMQP headers.
-    assert get_retry_count(msg) == 1
+    try:
+        # Despite non-empty AMQP headers (broker-added x-death etc.), extract_metadata
+        # reads from body JSON because 'partition' is absent from the AMQP headers.
+        metadata = extract_metadata(msg)
+        assert metadata["partition"] == "cozy-retry-part"
+        assert metadata["file_id"] == "cozy-retry-file"
 
-    await msg.ack()
+        # get_retry_count reads the genuine x-death stamped by the broker.
+        assert get_retry_count(msg) == 1
+    finally:
+        await msg.ack()
+        await channel.queue_delete(retry_q_name)

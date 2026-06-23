@@ -85,10 +85,7 @@ async def process_message(
     """
     try:
         headers = extract_metadata(message)
-        # For cozy-json format the body is the metadata JSON, not file content.
-        # Pass None so rag_upsert falls through to the file_url download path.
-        # For headers format the body is binary file content (or b"" for URL-based upserts).
-        body_bytes = message.body if "partition" in (message.headers or {}) else None
+        body_bytes = None
 
         msg = IndexMessage(
             action=headers.get("action", "upsert"),
@@ -108,7 +105,6 @@ async def process_message(
             ),
             content=ContentSpec(
                 file_url=headers.get("file_url"),
-                file_bearer=headers.get("file_bearer"),
             ),
         )
         log.debug("message_processing")
