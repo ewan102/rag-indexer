@@ -5,6 +5,7 @@ Tests are skipped when the broker is not reachable.
 """
 
 import asyncio
+from datetime import datetime
 
 import aio_pika
 import aiohttp
@@ -104,7 +105,7 @@ async def test_message_exhausts_retries_and_reaches_dlq(rmq_channel):
 
 
 async def test_dlq_failed_callback_is_posted(rmq_channel):
-    """publish_to_dlq with a callback_url header -> message to DLQ AND a 'failed' callback POST."""
+    """publish_to_dlq with a callback_url header -> message to DLQ AND an 'error'-status callback POST."""
     channel, main_q, dlq = rmq_channel
 
     # Local server standing in for the cozy webhook that receives the callback.
@@ -145,9 +146,13 @@ async def test_dlq_failed_callback_is_posted(rmq_channel):
         await dlq_msg.ack()
 
         # 2) The failure callback was POSTed with the expected body.
-        assert received == [
-            {"partition": "user-dlq", "file_id": "doc-dlq", "indexed": False}
-        ]
+        assert len(received) == 1
+        cb = received[0]
+        assert set(cb.keys()) == {"partition", "file_id", "status", "timestamp"}
+        assert cb["partition"] == "user-dlq"
+        assert cb["file_id"] == "doc-dlq"
+        assert cb["status"] == "error"
+        datetime.fromisoformat(cb["timestamp"])  # parsable ISO 8601
     finally:
         await server.close()
 
