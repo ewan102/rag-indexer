@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 
 import aio_pika
 import aiohttp
@@ -97,10 +98,14 @@ async def publish_to_dlq(
         log.debug("dlq_callback_skipped", reason="no_callback_url")
         return
 
+    # publish_to_dlq is only the terminal failure path (retries exhausted), so the
+    # status is always "error" -- the canonical vocabulary expected by cozy-stack's
+    # SetRAGStatus. timestamp is captured at POST time, ISO 8601 UTC.
     payload = {
         "partition": metadata.get("partition"),
         "file_id": metadata.get("file_id"),
-        "indexed": False,
+        "status": "error",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     try:
         async with session.post(callback_url, json=payload) as resp:

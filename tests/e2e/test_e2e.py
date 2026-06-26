@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from datetime import datetime
 
 import aiohttp
 import pytest
@@ -219,12 +220,12 @@ async def test_cozy_json_dlq_fail(rmq, rag_base_url):
     """Cozy-json format + DLQ: publish_to_dlq reads callback_url/partition/file_id from body.
 
     Verifies that:
-    - The failed-status POST is sent to the callback_url found in the JSON body.
+    - The error-status POST is sent to the callback_url found in the JSON body.
     - The DLQ message body is the original JSON (wire format preserved).
     """
     channel, exchange, queue = rmq
 
-    # Start an in-process callback stub to capture the failed-status POST.
+    # Start an in-process callback stub to capture the error-status POST.
     callback_received = []
 
     async def _callback(request: web.Request) -> web.Response:
@@ -258,12 +259,15 @@ async def test_cozy_json_dlq_fail(rmq, rag_base_url):
         # Give the async callback POST a moment to complete.
         await asyncio.sleep(0.2)
 
-        # Failed-status callback was POSTed to callback_url from the JSON body.
+        # Error-status callback was POSTed to callback_url from the JSON body,
+        # carrying exactly partition, file_id, status="error", and an ISO timestamp.
         assert len(callback_received) == 1
         cb = callback_received[0]
-        assert cb["indexed"] is False
+        assert set(cb.keys()) == {"partition", "file_id", "status", "timestamp"}
         assert cb["partition"] == "e2e-cozy-dlq"
         assert cb["file_id"] == "cozy-dlq-doc"
+        assert cb["status"] == "error"
+        datetime.fromisoformat(cb["timestamp"])  # parsable ISO 8601
 
         # DLQ message body is the original JSON (body preserved, format intact).
         dlq_msg = await asyncio.wait_for(dlq_queue.get(no_ack=True), timeout=5)
