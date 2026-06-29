@@ -92,7 +92,7 @@ async def test_fatal_error_goes_to_dlq_immediately(rmq_channel, monkeypatch):
         assert get_retry_count(msg) == 0
         with pytest.raises(FatalError):
             await process_message(msg, session)
-        await publish_to_dlq(channel, msg)
+        await publish_to_dlq(channel, msg, session)
         await msg.ack()
 
     dlq_msg = await _consume_one(dlq, timeout=5.0)
@@ -143,30 +143,8 @@ async def test_transient_error_exhausts_retries_to_dlq(rmq_channel, monkeypatch)
         assert next_retry_queue(get_retry_count(msg)) is None
         with pytest.raises(TransientError):
             await process_message(msg, session)
-        await publish_to_dlq(channel, msg)
-        await msg.ack()
-
-
-        # Wait for TTL expiry + re-delivery to main queue
-        # TTLs are 1s, 2s, 3s -- add buffer for processing
-        ttl_ms = TEST_RETRY_QUEUES[cycle][1]
-        await asyncio.sleep(ttl_ms / 1000.0 + 1.0)
-
-    # Final consume: retry count == len(RETRY_QUEUES), retries exhausted
-    msg = await _consume_one(main_q)
-    assert msg.body == test_body
-
-    retry_count = get_retry_count(msg)
-    assert retry_count == len(TEST_RETRY_QUEUES)
-
-    # next_retry_queue returns None when exhausted
-    assert next_retry_queue(retry_count) is None
-
-    # Route to DLQ. No callback_url header -> callback is skipped silently
-    # (current prod behavior: cozy does not send the header yet).
-    async with aiohttp.ClientSession() as session:
         await publish_to_dlq(channel, msg, session)
-    await msg.ack()
+        await msg.ack()
 
     # Verify message arrived in DLQ
     dlq_msg = await _consume_one(dlq, timeout=5.0)
