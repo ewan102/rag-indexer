@@ -1,9 +1,16 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class RagConn(BaseModel):
     base_url: str
     api_key: str
+
+    @field_validator("base_url")
+    @classmethod
+    def _strip_trailing_slash(cls, v: str) -> str:
+        # Normalize once so URL building never produces '//' (cozy rag.url may
+        # carry a trailing slash); applies to every endpoint and the Origin header.
+        return v.rstrip("/")
 
 
 class ContentSpec(BaseModel):
