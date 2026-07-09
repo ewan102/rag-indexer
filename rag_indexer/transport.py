@@ -1,12 +1,22 @@
 import asyncio
+from datetime import datetime, timezone
 
 import aio_pika
+import aiohttp
 import structlog
 from aio_pika import ExchangeType, Message, DeliveryMode
 from aiohttp import web
 from prometheus_client.aiohttp import make_aiohttp_handler
 
-from rag_indexer.config import EXCHANGE_NAME, ROUTING_KEY, QUEUE_NAME, RETRY_QUEUES, DLQ_NAME
+from rag_indexer.config import (
+    EXCHANGE_NAME,
+    ROUTING_KEY,
+    QUEUE_NAME,
+    RETRY_QUEUES,
+    DLQ_NAME,
+    CALLBACK_TIMEOUT,
+)
+from rag_indexer.processing import extract_metadata
 
 log = structlog.get_logger()
 
@@ -44,6 +54,19 @@ async def start_health_server(connection, host="0.0.0.0", port=8080):
 
 
 # ---------- Retry / DLQ publishing ----------
+def _file_metadata(metadata: dict) -> dict:
+    """File metadata echoed to the cozy callback, mirroring rag_client.build_metadata."""
+    result = {
+        "version": metadata.get("version") or metadata.get("md5sum") or "",
+        "datetime": metadata.get("datetime") or "",
+        "doctype": metadata.get("doctype") or "",
+    }
+    app_metadata = metadata.get("app_metadata")
+    if isinstance(app_metadata, dict):
+        result |= app_metadata
+    return result
+
+
 async def publish_to_retry(
     channel: aio_pika.Channel,
     original_msg: aio_pika.IncomingMessage,
@@ -64,17 +87,55 @@ async def publish_to_retry(
 async def publish_to_dlq(
     channel: aio_pika.Channel,
     original_msg: aio_pika.IncomingMessage,
+    session: aiohttp.ClientSession,
+    metadata: dict | None = None,
 ) -> None:
-    """Publish message copy to the dead letter queue."""
+    """Publish message copy to the dead letter queue.
+
+    After the message safely lands in the DLQ, best-effort notify the cozy callback
+    (via callback_url from AMQP headers or cozy-json body) that indexing failed.
+
+    Pass `metadata` if already extracted by the caller to avoid a redundant parse.
+    """
+    # Republish to the DLQ FIRST -- the message must reach the DLQ no matter what.
+    # Use real AMQP headers (including any x-death entries) to preserve replay fidelity
+    # and keep the original wire format intact for manual inspection / replaying.
+    real_headers = original_msg.headers or {}
     await channel.default_exchange.publish(
         Message(
             original_msg.body,
             content_type=original_msg.content_type,
-            headers={**(original_msg.headers or {})},
+            headers={**real_headers},
             delivery_mode=DeliveryMode.PERSISTENT,
         ),
         routing_key=DLQ_NAME,
     )
+
+    # Best-effort failure callback to cozy-stack -- must never block or fail the DLQ publish.
+    if metadata is None:
+        metadata = extract_metadata(original_msg)
+    callback_url = metadata.get("callback_url")
+    if not callback_url:
+        # Old messages / tests without a callback field: nothing to notify.
+        log.debug("dlq_callback_skipped", reason="no_callback_url")
+        return
+
+    # publish_to_dlq is only the terminal failure path (retries exhausted), so the
+    # status is always "error" -- the canonical vocabulary expected by cozy-stack's
+    # SetRAGStatus. timestamp is captured at POST time, ISO 8601 UTC.
+    payload = {
+        "partition": metadata.get("partition"),
+        "file_id": metadata.get("file_id"),
+        "status": "error",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "metadata": _file_metadata(metadata),
+    }
+    try:
+        async with session.post(callback_url, json=payload, timeout=CALLBACK_TIMEOUT) as resp:
+            resp.raise_for_status()
+        log.info("dlq_callback_sent", callback_url=callback_url)
+    except Exception as e:
+        log.warning("dlq_callback_failed", callback_url=callback_url, error=str(e))
 
 
 # ---------- Topology declaration ----------

@@ -36,8 +36,14 @@ def build_retry_queues(intervals: list[int]) -> list[tuple[str, int]]:
     - 3600000+ and divisible by 3600000 -> "Xh"
     - 60000+ and divisible by 60000 -> "Xm"
     - Otherwise -> "Xs" using ttl_ms // 1000
+
+    Names must stay unique: retry counting reads distinct x-death entries
+    keyed by queue name, so two intervals collapsing to the same label
+    (e.g. 30000 and 30500 both -> "30s") would break it. Only colliding
+    names get a numeric suffix; non-colliding names are unchanged.
     """
     queues = []
+    seen = set()
     for ttl_ms in intervals:
         if ttl_ms >= 3_600_000 and ttl_ms % 3_600_000 == 0:
             label = f"{ttl_ms // 3_600_000}h"
@@ -45,7 +51,13 @@ def build_retry_queues(intervals: list[int]) -> list[tuple[str, int]]:
             label = f"{ttl_ms // 60_000}m"
         else:
             label = f"{ttl_ms // 1000}s"
-        queues.append((f"rag.index.retry.{label}.q", ttl_ms))
+        name = f"rag.index.retry.{label}.q"
+        i = 2
+        while name in seen:
+            name = f"rag.index.retry.{label}-{i}.q"
+            i += 1
+        seen.add(name)
+        queues.append((name, ttl_ms))
     return queues
 
 
@@ -58,6 +70,11 @@ CONCURRENCY = int(os.getenv("CONCURRENCY", "1"))
 
 _HTTP_TIMEOUT_SECONDS = int(os.getenv("HTTP_TIMEOUT", "60"))
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SECONDS)
+
+# Short, dedicated timeout for the best-effort failure callback: it must never
+# block the DLQ path or the shutdown drain on a slow/unreachable cozy webhook.
+_CALLBACK_TIMEOUT_SECONDS = int(os.getenv("CALLBACK_TIMEOUT", "5"))
+CALLBACK_TIMEOUT = aiohttp.ClientTimeout(total=_CALLBACK_TIMEOUT_SECONDS)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
