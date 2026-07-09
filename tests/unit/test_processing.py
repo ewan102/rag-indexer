@@ -142,7 +142,8 @@ async def test_upsert_new_on_404_triggers_post(
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
-    assert calls["upsert"]["file_bytes"] == body
+    # Body is never the file content: rag_upsert fetches it via file_url, so None.
+    assert calls["upsert"]["file_bytes"] is None
     assert calls["upsert"]["is_new"] is True
     # verifie quelques champs du message reconstruit par le consumer
     m = calls["upsert"]["msg"]
@@ -177,7 +178,7 @@ async def test_upsert_update_on_md5_change_triggers_put(
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
-    assert calls["upsert"]["file_bytes"] == body
+    assert calls["upsert"]["file_bytes"] is None
     assert calls["upsert"]["is_new"] is False
 
 
@@ -313,13 +314,13 @@ async def test_missing_file_id_raises_fatal_error(
 
 
 @pytest.mark.asyncio
-async def test_empty_body_upsert_calls_rag_upsert_with_empty_bytes(
+async def test_upsert_passes_none_body_to_rag_upsert(
     monkeypatch, headers_base, aiohttp_session_stub
 ):
-    """Upsert with empty body (b'') but valid headers should NOT be an error.
+    """Upsert always passes body_bytes=None to rag_upsert.
 
-    processing.py passes body_bytes directly to rag_upsert. Verify rag_upsert
-    is called with empty bytes.
+    The message body is never the file content; rag_upsert fetches the file
+    via file_url. So process_message passes None regardless of the body.
     """
     calls = {"upsert": None}
 
@@ -338,8 +339,39 @@ async def test_empty_body_upsert_calls_rag_upsert_with_empty_bytes(
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
-    assert calls["upsert"]["file_bytes"] == b""
+    assert calls["upsert"]["file_bytes"] is None
     assert calls["upsert"]["is_new"] is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_forwards_app_metadata_to_rag_upsert(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """app_metadata from the message reaches the IndexMessage passed to rag_upsert.
+
+    process_message must wire headers['app_metadata'] into the IndexMessage so that
+    build_metadata can merge the custom keys into the metadata sent to OpenRAG.
+    """
+    captured = {"msg": None}
+
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(404)
+
+    async def fake_upsert(session, msg, file_bytes, is_new):
+        captured["msg"] = msg
+        return None
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+
+    headers = {**headers_base, "action": "upsert", "app_metadata": {"custom": "value"}}
+    msg = DummyMessage(body=b"", headers=headers)
+    await process_message(msg, aiohttp_session_stub)
+
+    assert captured["msg"] is not None
+    assert captured["msg"].app_metadata == {"custom": "value"}
+    # And build_metadata merges it into the outgoing metadata.
+    assert rag_client.build_metadata(captured["msg"])["custom"] == "value"
 
 
 @pytest.mark.asyncio

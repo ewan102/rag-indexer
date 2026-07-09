@@ -1,14 +1,14 @@
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 import aiohttp
 import structlog
 from aiohttp import FormData
 
 from rag_indexer.config import HTTP_TIMEOUT
-from rag_indexer.models import IndexMessage, RagConn, ContentSpec
+from rag_indexer.models import IndexMessage, RagConn
 from rag_indexer.errors import TransientError, FatalError
 
 log = structlog.get_logger()
@@ -52,13 +52,11 @@ async def rag_delete(
 
 
 async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -> bytes:
-    headers = {}
-    if msg.content.file_bearer:
-        headers["Authorization"] = f"Bearer {msg.content.file_bearer}"
-
+    # The file_url carries its own authentication via the secret in its path
+    # (cozy-stack /files/downloads/<secret>/<filename>); no Authorization header.
     log.debug("file_download", source="file_url")
     try:
-        async with session.get(msg.content.file_url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
+        async with session.get(msg.content.file_url, timeout=HTTP_TIMEOUT) as resp:
             if resp.status == 429 or resp.status >= 500:
                 raise TransientError(f"Failed to fetch file_url ({resp.status})")
             if resp.status >= 400:
@@ -75,7 +73,7 @@ async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -
         raise TransientError(f"Network error fetching file_url: {e}") from e
 
 
-def build_metadata(msg: IndexMessage) -> Dict[str, Any]:
+def build_metadata(msg: IndexMessage) -> dict[str, Any]:
     meta = {
         "version": msg.version or msg.md5sum or "",
         "datetime": msg.datetime or "",
@@ -98,7 +96,7 @@ async def rag_upsert(
     form = FormData()
     rag = msg.rag
 
-    # Content source: note_markdown OR file_url download
+    # Content source: in-memory bytes (file param) OR file_url download.
     filename = msg.name or f"{msg.file_id}.bin"
 
     if file is not None:
@@ -115,7 +113,13 @@ async def rag_upsert(
 
     form.add_field("metadata", json.dumps(meta))
 
-    # query params. TODO: check it is useful, should not
+    # Forward the cozy callback URL so OpenRAG can POST the async indexing status.
+    if msg.callback_url:
+        form.add_field("callback_url", msg.callback_url)
+        log.debug("upsert_callback_url_forwarded", callback_url=msg.callback_url)
+    else:
+        log.debug("upsert_callback_url_absent")
+
     params = {}
     if msg.dir_id:
         params["parent_id"] = msg.dir_id
@@ -124,7 +128,6 @@ async def rag_upsert(
     if msg.md5sum:
         params["md5sum"] = msg.md5sum
 
-    # POST (new) vs PUT (update) is decided after the existence GET above
     url_base = f"{rag.base_url}/indexer/partition/{msg.partition}/file/{msg.file_id}"
 
     method = "POST" if is_new else "PUT"
@@ -139,12 +142,12 @@ async def rag_upsert(
         headers=headers,
         timeout=HTTP_TIMEOUT,
     ) as resp:
-        # read body to drain the connection
+        # read response body to release the connection
         resp_text = await resp.text()
         if resp.status == 429 or resp.status >= 500:
             raise TransientError(f"RAG {method} {resp.status}: {resp_text}")
         if resp.status == 409:
-            raise TransientError(f"RAG {method} {resp.status} Conflict: {resp_text}")
+            return
         if resp.status >= 400:
             raise FatalError(f"RAG {method} {resp.status}: {resp_text}")
         return

@@ -62,14 +62,14 @@ def test_build_metadata_without_app_metadata():
 
 
 # ------------------------
-# NEW: File download with bearer token
+# NEW: File download via self-authenticating file_url
 # ------------------------
 @pytest.mark.asyncio
-async def test_get_producer_file_with_bearer_token():
-    """Verify that get_producer_file works when file_bearer is set.
+async def test_get_producer_file_no_auth_header():
+    """get_producer_file downloads from file_url without any Authorization header.
 
-    The current FakeSession doesn't capture headers, so this test verifies
-    the function doesn't crash with a bearer and returns content correctly.
+    The file_url is self-authenticating (secret in the path), so no bearer is
+    ever sent. This verifies the function returns content correctly.
     """
     expected_bytes = b"secure-file-content"
     fake_resp = FakeContextResp(status=200, body=expected_bytes)
@@ -81,8 +81,7 @@ async def test_get_producer_file_with_bearer_token():
         file_id="f1",
         rag=RagConn(base_url="http://rag:8000", api_key="key"),
         content=ContentSpec(
-            file_url="http://example.com/secure.bin",
-            file_bearer="my-bearer-token",
+            file_url="http://example.com/files/downloads/sekret/secure.bin",
         ),
     )
     result = await get_producer_file(fake_session, msg)
