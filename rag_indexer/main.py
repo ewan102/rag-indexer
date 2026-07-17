@@ -79,7 +79,7 @@ async def main():
                         start_time = time.monotonic()
 
                         try:
-                            await process_message(message, session)
+                            await process_message(message, session, metadata)
                             # ACK implicit via context manager on success
                             duration = time.monotonic() - start_time
                             MESSAGES_TOTAL.labels(action=action, status="success", partition=partition).inc()

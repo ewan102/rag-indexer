@@ -16,6 +16,7 @@ from rag_indexer.config import (
     DLQ_NAME,
     CALLBACK_TIMEOUT,
 )
+from rag_indexer import rag_client
 from rag_indexer.processing import extract_metadata
 
 log = structlog.get_logger()
@@ -55,16 +56,14 @@ async def start_health_server(connection, host="0.0.0.0", port=8080):
 
 # ---------- Retry / DLQ publishing ----------
 def _file_metadata(metadata: dict) -> dict:
-    """File metadata echoed to the cozy callback, mirroring rag_client.build_metadata."""
-    result = {
-        "version": metadata.get("version") or metadata.get("md5sum") or "",
-        "datetime": metadata.get("datetime") or "",
-        "doctype": metadata.get("doctype") or "",
-    }
-    app_metadata = metadata.get("app_metadata")
-    if isinstance(app_metadata, dict):
-        result |= app_metadata
-    return result
+    """File metadata echoed to the cozy callback -- same mapping as rag_client.build_metadata."""
+    return rag_client.metadata_dict(
+        version=metadata.get("version"),
+        md5sum=metadata.get("md5sum"),
+        datetime=metadata.get("datetime"),
+        doctype=metadata.get("doctype"),
+        app_metadata=metadata.get("app_metadata"),
+    )
 
 
 async def publish_to_retry(

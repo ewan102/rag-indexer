@@ -5,6 +5,7 @@ Tests are skipped when the broker is not reachable.
 """
 
 import asyncio
+import hashlib
 from datetime import datetime
 
 import aio_pika
@@ -35,18 +36,23 @@ async def _consume_one(queue, timeout: float = 15.0) -> aio_pika.IncomingMessage
         return msg
 
 
-def _make_message(file_id: str, body: bytes, *, name: str, content_type: str = "text/markdown") -> Message:
+def _make_message(
+    file_id: str, body: bytes, *, name: str, content_type: str = "text/markdown", md5sum: str | None = None
+) -> Message:
+    headers = {
+        "action": "upsert",
+        "partition": "test-partition",
+        "file_id": file_id,
+        "rag_base_url": "http://fake-rag:8000",
+        "rag_api_key": "",
+        "content_type": content_type,
+        "name": name,
+    }
+    if md5sum:
+        headers["md5sum"] = md5sum
     return Message(
         body,
-        headers={
-            "action": "upsert",
-            "partition": "test-partition",
-            "file_id": file_id,
-            "rag_base_url": "http://fake-rag:8000",
-            "rag_api_key": "",
-            "content_type": content_type,
-            "name": name,
-        },
+        headers=headers,
         delivery_mode=DeliveryMode.PERSISTENT,
     )
 
@@ -221,19 +227,23 @@ async def test_dlq_failed_callback_is_posted(rmq_channel):
 
 
 async def test_transient_error_then_success_on_retry(rmq_channel, monkeypatch):
-    """GET 503 on first attempt → retry → GET 404 + POST to real RAG → success"""
+    """GET 503 on first attempt → retry → GET 404 + POST → success."""
     channel, main_q, dlq = rmq_channel
     call_count = 0
-    original_rag_get = rag_client.rag_get_file
 
     async def flaky_get(session, rag, partition, file_id):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
             return FakeResp(503, text_data="RAG temporarily down")
-        return await original_rag_get(session, rag, partition, file_id)
+        return FakeResp(404)
+
+    async def fake_upsert(session, msg, is_new):
+        assert is_new is True
+        return None
 
     monkeypatch.setattr(rag_client, "rag_get_file", flaky_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
 
     exchange = await channel.get_exchange(TEST_EXCHANGE)
     await exchange.publish(
@@ -260,16 +270,34 @@ async def test_transient_error_then_success_on_retry(rmq_channel, monkeypatch):
     assert await dlq.get(fail=False) is None
 
 
-async def test_concurrent_messages_same_file(rmq_channel):
+async def test_concurrent_messages_same_file(rmq_channel, monkeypatch):
     """2 messages with same file_id processed sequentially — second is a no-op (same version)."""
     channel, main_q, dlq = rmq_channel
 
-    exchange = await channel.get_exchange(TEST_EXCHANGE)
     body = b"# Concurrent test\n\nMeme contenu.\n"
+    md5sum = hashlib.md5(body).hexdigest()
 
+    # Tiny in-memory RAG store: first GET misses (404), fake_upsert "persists"
+    # the md5sum, second GET hits with a matching version so need_index=False.
+    store: dict[str, str] = {}
+
+    async def fake_get(session, rag, partition, file_id):
+        if file_id in store:
+            return FakeResp(200, json_data={"metadata": {"md5sum": store[file_id]}})
+        return FakeResp(404)
+
+    async def fake_upsert(session, msg, is_new):
+        assert is_new is True
+        store[msg.file_id] = msg.md5sum
+        return None
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+
+    exchange = await channel.get_exchange(TEST_EXCHANGE)
     for _ in range(2):
         await exchange.publish(
-            _make_message("concurrent-same-file-001", body, name="concurrent.md"),
+            _make_message("concurrent-same-file-001", body, name="concurrent.md", md5sum=md5sum),
             routing_key="test.retry.index",
         )
 

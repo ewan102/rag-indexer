@@ -73,35 +73,47 @@ async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -
         raise TransientError(f"Network error fetching file_url: {e}") from e
 
 
-def build_metadata(msg: IndexMessage) -> dict[str, Any]:
+def metadata_dict(
+    *,
+    version: str | None,
+    md5sum: str | None,
+    datetime: str | None,
+    doctype: str | None,
+    app_metadata: dict | None,
+) -> dict[str, Any]:
+    """Shared field mapping for metadata sent to OpenRAG or echoed to the cozy callback."""
     meta = {
-        "version": msg.version or msg.md5sum or "",
-        "datetime": msg.datetime or "",
-        "doctype": msg.doctype or "",
+        "version": version or md5sum or "",
+        "datetime": datetime or "",
+        "doctype": doctype or "",
     }
-    if msg.app_metadata is not None and isinstance(msg.app_metadata, dict):
-        # Custom metadata from app
-        app_meta = msg.app_metadata
-        meta |= app_meta
+    if isinstance(app_metadata, dict):
+        meta |= app_metadata
     return meta
+
+
+def build_metadata(msg: IndexMessage) -> dict[str, Any]:
+    return metadata_dict(
+        version=msg.version,
+        md5sum=msg.md5sum,
+        datetime=msg.datetime,
+        doctype=msg.doctype,
+        app_metadata=msg.app_metadata,
+    )
 
 
 async def rag_upsert(
     session: aiohttp.ClientSession,
     msg: IndexMessage,
-    file: bytes,
     is_new: bool
 ) -> None:
 
     form = FormData()
     rag = msg.rag
 
-    # Content source: in-memory bytes (file param) OR file_url download.
     filename = msg.name or f"{msg.file_id}.bin"
 
-    if file is not None:
-        data_bytes = file
-    elif msg.content and msg.content.file_url:
+    if msg.content and msg.content.file_url:
         data_bytes = await get_producer_file(session, msg)
     else:
         raise FatalError("No content provided")
@@ -147,6 +159,7 @@ async def rag_upsert(
         if resp.status == 429 or resp.status >= 500:
             raise TransientError(f"RAG {method} {resp.status}: {resp_text}")
         if resp.status == 409:
+            log.warning("rag_upsert_conflict", method=method, file_id=msg.file_id, partition=msg.partition)
             return
         if resp.status >= 400:
             raise FatalError(f"RAG {method} {resp.status}: {resp_text}")

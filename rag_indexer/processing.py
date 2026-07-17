@@ -14,13 +14,14 @@ log = structlog.get_logger()
 
 # Two wire formats coexist:
 #   "headers" format   — all business fields are AMQP message headers (legacy, used by all
-#                        existing producers and tests). Body contains binary file content.
+#                        existing producers and tests).
 #   "cozy-json" format — AMQP headers carry only broker-added fields (x-death, …); all
-#                        business fields are JSON-encoded in the body. File content is always
-#                        fetched via file_url. Used when the producer cannot set custom AMQP
-#                        headers (e.g. cozy-stack's shared rabbitmq package).
+#                        business fields are JSON-encoded in the body. Used when the producer
+#                        cannot set custom AMQP headers (e.g. cozy-stack's shared rabbitmq
+#                        package).
 #
-# The two formats are transparent to all code above extract_metadata().
+# File content is always fetched via file_url in both formats -- the AMQP body never
+# carries binary content. The two formats are transparent to all code above extract_metadata().
 
 
 def extract_metadata(message: aio_pika.IncomingMessage) -> dict:
@@ -40,7 +41,7 @@ def extract_metadata(message: aio_pika.IncomingMessage) -> dict:
     """
     raw_headers = message.headers or {}
     if "partition" in raw_headers:
-        return raw_headers  # "headers" format
+        return raw_headers
 
     try:
         body = message.body
@@ -75,17 +76,20 @@ def next_retry_queue(retry_count: int) -> str | None:
 
 
 async def process_message(
-    message: aio_pika.IncomingMessage, session: aiohttp.ClientSession
+    message: aio_pika.IncomingMessage,
+    session: aiohttp.ClientSession,
+    metadata: dict | None = None,
 ) -> None:
     """Validate, route, and execute the indexing action for one message.
 
     Supports both 'headers' and 'cozy-json' wire formats via extract_metadata().
     Raises TransientError for retryable failures and FatalError for permanent ones;
     unexpected exceptions are wrapped as FatalError to prevent infinite retry loops.
+
+    Pass `metadata` if already extracted by the caller to avoid a redundant parse.
     """
     try:
-        headers = extract_metadata(message)
-        body_bytes = None
+        headers = metadata if metadata is not None else extract_metadata(message)
 
         msg = IndexMessage(
             action=headers.get("action", "upsert"),
@@ -109,7 +113,6 @@ async def process_message(
             ),
         )
         log.debug("message_processing")
-        # DELETE path
         if msg.action == "delete":
             resp = await rag_client.rag_delete(session, msg.rag, msg.partition, msg.file_id)
             if 200 <= resp.status < 300 or resp.status == 404:
@@ -118,9 +121,7 @@ async def process_message(
                 raise TransientError(f"RAG delete {resp.status}: {resp.text}")
             raise FatalError(f"RAG delete {resp.status}: {resp.text}")
 
-        # UPSERT path
         if msg.action == "upsert":
-            # 1) GET current
             log.debug("rag_get_file", detail="checking current version")
             resp = await rag_client.rag_get_file(session, msg.rag, msg.partition, msg.file_id)
             if resp.status == 429 or resp.status >= 500:
@@ -143,10 +144,9 @@ async def process_message(
                 raise FatalError(f"RAG GET {resp.status}: {resp.text}")
 
             if not need_index:
-                return  # nothing to do
+                return
 
-            # 2) Build multipart & send
-            return await rag_client.rag_upsert(session, msg, body_bytes, is_new)
+            return await rag_client.rag_upsert(session, msg, is_new)
         else:
             raise FatalError(f"Unknown action: {msg.action}")
 

@@ -91,10 +91,12 @@ async def publish_message(
 ) -> None:
     """Publish a message in either 'headers' or 'cozy-json' format.
 
-    'headers' (default): business fields in AMQP headers, file content in body.
-    'cozy-json': all business fields JSON-encoded in the body, AMQP headers empty.
-                 File content must be provided via the file_url field; any binary
-                 body is discarded. content-type is set to application/json.
+    'headers' (default): business fields in AMQP headers.
+    'cozy-json': all business fields JSON-encoded in the body, AMQP headers empty;
+                 content-type is set to application/json.
+
+    In both formats file content is fetched by the consumer via the file_url field;
+    the AMQP body never carries binary content.
     """
     try:
         connection = await aio_pika.connect_robust(RABBITMQ_URL)
@@ -141,8 +143,9 @@ async def cmd_upsert_file(args: argparse.Namespace) -> None:
     content_type = args.content_type or guess_content_type(args.path)
     fmt = args.format
 
-    if fmt == "cozy-json" and not getattr(args, "file_url", None):
-        print("Warning: --format cozy-json without --file-url; consumer will fail to fetch file content.", file=sys.stderr)
+    if not args.file_url:
+        print("--file-url is required: the consumer always fetches file content via file_url, never from the AMQP body.", file=sys.stderr)
+        sys.exit(2)
 
     headers = build_headers(
         action="upsert",
@@ -156,12 +159,12 @@ async def cmd_upsert_file(args: argparse.Namespace) -> None:
         dir_id=args.dir_id,
         dt=args.datetime,
         content_type=content_type,
+        file_url=args.file_url,
         callback_url=args.callback_url,
     )
 
-    # In cozy-json mode the body is the JSON metadata; binary content must come via file_url.
-    body = b"" if fmt == "cozy-json" else data
-    await publish_message(routing_key=args.routing_key, headers=headers, body=body, fmt=fmt)
+    # data is only read to derive md5sum/content-type/name -- content always comes via file_url.
+    await publish_message(routing_key=args.routing_key, headers=headers, body=b"", fmt=fmt)
     print(f"Published upsert-file for {args.file_id} on {args.partition} [{fmt}]")
 
 
@@ -228,35 +231,28 @@ def make_parser() -> argparse.ArgumentParser:
         "--content-type", help="Content-Type (inferred from file for upsert-file)"
     )
     p.add_argument("--callback-url", help="URL de callback cozy pour le statut d'indexation")
+    p.add_argument(
+        "--format", choices=["headers", "cozy-json"], default="headers",
+        help="Wire format: 'headers' (default) or 'cozy-json' (all fields in JSON body)",
+    )
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # upsert-file
     spf = sub.add_parser(
-        "upsert-file", help="Send a binary directly in the body"
+        "upsert-file", help="Derive md5sum/content-type/name from a local file; consumer downloads via --file-url"
     )
     spf.add_argument("path", help="File path or '-' for stdin")
-    spf.add_argument(
-        "--format", choices=["headers", "cozy-json"], default="headers",
-        help="Wire format: 'headers' (default) or 'cozy-json' (all fields in JSON body)",
-    )
+    spf.add_argument("--file-url", required=True, help="URL of the file to download")
     spf.set_defaults(func=cmd_upsert_file)
 
     # upsert-url
     spu = sub.add_parser("upsert-url", help="Let the consumer download via URL")
     spu.add_argument("--file-url", required=True, help="URL of the file to download")
-    spu.add_argument(
-        "--format", choices=["headers", "cozy-json"], default="headers",
-        help="Wire format: 'headers' (default) or 'cozy-json' (all fields in JSON body)",
-    )
     spu.set_defaults(func=cmd_upsert_url)
 
     # delete
     spd = sub.add_parser("delete", help="Delete an indexed file")
-    spd.add_argument(
-        "--format", choices=["headers", "cozy-json"], default="headers",
-        help="Wire format: 'headers' (default) or 'cozy-json' (all fields in JSON body)",
-    )
     spd.set_defaults(func=cmd_delete)
 
     return p

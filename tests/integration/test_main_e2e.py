@@ -181,6 +181,7 @@ async def _publish(
     rag_base_url: str,
     content_type: str = "text/markdown",
     action: str = "upsert",
+    file_url: str | None = None,
 ) -> None:
     """Publish a message via the producer — same code path as production."""
     headers = producer_mod.build_headers(
@@ -191,6 +192,7 @@ async def _publish(
         rag_api_key="",
         content_type=content_type,
         name=name,
+        file_url=file_url,
     )
     await producer_mod.publish_message(
         routing_key=_PUBLISH_ROUTING_KEY,
@@ -210,7 +212,10 @@ async def test_upsert_happy_path(rabbitmq_url, monkeypatch, rag_stub, rmq_channe
     response_rules[("GET", "/partition/test-partition/file/e2e-upsert-001")] = (404, {})
     response_rules[("POST", "/indexer/partition/test-partition/file/e2e-upsert-001")] = (201, {"id": "e2e-upsert-001"})
 
-    await _publish(file_id="e2e-upsert-001", body=_DOCUMENT_MARKDOWN, name="guide.md", rag_base_url=rag_base_url)
+    await _publish(
+        file_id="e2e-upsert-001", body=_DOCUMENT_MARKDOWN, name="guide.md",
+        rag_base_url=rag_base_url, file_url=f"{rag_base_url}/testfile",
+    )
     await _poll(lambda: any(c["method"] == "POST" for c in call_log))
 
     post_calls = [c for c in call_log if c["method"] == "POST"]
@@ -268,7 +273,10 @@ async def test_transient_error_then_success_on_retry(rabbitmq_url, monkeypatch, 
     response_rules[("GET", "/partition/test-partition/file/e2e-flaky-001")] = flaky_get
     response_rules[("POST", "/indexer/partition/test-partition/file/e2e-flaky-001")] = (201, {"id": "e2e-flaky-001"})
 
-    await _publish(file_id="e2e-flaky-001", body=_DOCUMENT_MARKDOWN, name="flaky.md", rag_base_url=rag_base_url)
+    await _publish(
+        file_id="e2e-flaky-001", body=_DOCUMENT_MARKDOWN, name="flaky.md",
+        rag_base_url=rag_base_url, file_url=f"{rag_base_url}/testfile",
+    )
 
     ttl_ms = TEST_RETRY_QUEUES[0][1]
     await _poll(lambda: get_count["n"] >= 2, timeout=ttl_ms / 1000.0 + 5.0)

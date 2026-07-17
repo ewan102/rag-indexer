@@ -117,9 +117,8 @@ async def test_upsert_new_on_404_triggers_post(
     async def fake_get(session, rag, partition, file_id):
         return FakeResp(404)
 
-    async def fake_upsert(session, msg, file_bytes, is_new):
+    async def fake_upsert(session, msg, is_new):
         calls["upsert"] = {
-            "file_bytes": file_bytes,
             "is_new": is_new,
             "msg": msg,
         }
@@ -142,8 +141,6 @@ async def test_upsert_new_on_404_triggers_post(
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
-    # Body is never the file content: rag_upsert fetches it via file_url, so None.
-    assert calls["upsert"]["file_bytes"] is None
     assert calls["upsert"]["is_new"] is True
     # verifie quelques champs du message reconstruit par le consumer
     m = calls["upsert"]["msg"]
@@ -164,8 +161,8 @@ async def test_upsert_update_on_md5_change_triggers_put(
         # Document exists with version "OLD"
         return FakeResp(200, json_data={"metadata": {"version": "OLD"}})
 
-    async def fake_upsert(session, msg, file_bytes, is_new):
-        calls["upsert"] = {"file_bytes": file_bytes, "is_new": is_new}
+    async def fake_upsert(session, msg, is_new):
+        calls["upsert"] = {"is_new": is_new}
         return None
 
     monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
@@ -178,7 +175,6 @@ async def test_upsert_update_on_md5_change_triggers_put(
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
-    assert calls["upsert"]["file_bytes"] is None
     assert calls["upsert"]["is_new"] is False
 
 
@@ -192,7 +188,7 @@ async def test_upsert_same_md5_skips(monkeypatch, headers_base, aiohttp_session_
     async def fake_get(session, rag, partition, file_id):
         return FakeResp(200, json_data={"metadata": {"md5sum": "SAME"}})
 
-    async def fake_upsert(session, msg, file_bytes, is_new):
+    async def fake_upsert(session, msg, is_new):
         called["upsert"] = True
 
     monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
@@ -314,36 +310,6 @@ async def test_missing_file_id_raises_fatal_error(
 
 
 @pytest.mark.asyncio
-async def test_upsert_passes_none_body_to_rag_upsert(
-    monkeypatch, headers_base, aiohttp_session_stub
-):
-    """Upsert always passes body_bytes=None to rag_upsert.
-
-    The message body is never the file content; rag_upsert fetches the file
-    via file_url. So process_message passes None regardless of the body.
-    """
-    calls = {"upsert": None}
-
-    async def fake_get(session, rag, partition, file_id):
-        return FakeResp(404)
-
-    async def fake_upsert(session, msg, file_bytes, is_new):
-        calls["upsert"] = {"file_bytes": file_bytes, "is_new": is_new}
-        return None
-
-    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
-    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
-
-    headers = {**headers_base, "action": "upsert"}
-    msg = DummyMessage(body=b"", headers=headers)
-    await process_message(msg, aiohttp_session_stub)
-
-    assert calls["upsert"] is not None
-    assert calls["upsert"]["file_bytes"] is None
-    assert calls["upsert"]["is_new"] is True
-
-
-@pytest.mark.asyncio
 async def test_upsert_forwards_app_metadata_to_rag_upsert(
     monkeypatch, headers_base, aiohttp_session_stub
 ):
@@ -357,7 +323,7 @@ async def test_upsert_forwards_app_metadata_to_rag_upsert(
     async def fake_get(session, rag, partition, file_id):
         return FakeResp(404)
 
-    async def fake_upsert(session, msg, file_bytes, is_new):
+    async def fake_upsert(session, msg, is_new):
         captured["msg"] = msg
         return None
 
@@ -420,24 +386,26 @@ async def test_unexpected_exception_raises_fatal(
 
 
 @pytest.mark.asyncio
-async def test_upsert_post_409_raises_transient_error(
+async def test_upsert_post_409_conflict_does_not_raise(
     monkeypatch, headers_base, aiohttp_session_stub
 ):
-    """POST returning 409 Conflict (race condition) should be TransientError, not FatalError."""
+    """POST returning 409 Conflict (race condition) is swallowed by rag_upsert.
+
+    rag_upsert treats a 409 as success (logs a warning, doesn't raise) rather than
+    retrying -- the loser of the race just completes normally, no exception at all.
+    """
     async def fake_get(session, rag, partition, file_id):
         return FakeResp(404)
 
-    async def fake_upsert(session, msg, file_bytes, is_new):
-        from rag_indexer.errors import TransientError
-        raise TransientError("RAG POST 409 Conflict: File already exists")
+    async def fake_upsert(session, msg, is_new):
+        return None
 
     monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
     monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
 
     headers = {**headers_base, "action": "upsert"}
     msg = DummyMessage(body=b"data", headers=headers)
-    with pytest.raises(TransientError, match="409"):
-        await process_message(msg, aiohttp_session_stub)
+    await process_message(msg, aiohttp_session_stub)  # must not raise
 
 
 @pytest.mark.asyncio
@@ -454,8 +422,8 @@ async def test_upsert_get_200_no_version_no_md5sum_reindexes(
     async def fake_get(session, rag, partition, file_id):
         return FakeResp(200, json_data={"metadata": {}})
 
-    async def fake_upsert(session, msg, file_bytes, is_new):
-        calls["upsert"] = {"file_bytes": file_bytes, "is_new": is_new}
+    async def fake_upsert(session, msg, is_new):
+        calls["upsert"] = {"is_new": is_new}
         return None
 
     monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
