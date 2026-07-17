@@ -5,7 +5,6 @@ requests and returns programmable responses. Does NOT require RabbitMQ.
 """
 
 import aiohttp
-import pytest
 import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestServer

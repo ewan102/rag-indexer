@@ -10,8 +10,7 @@ from aio_pika import ExchangeType, Message, DeliveryMode
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from rag_indexer.processing import process_message, extract_metadata
-from rag_indexer.errors import TransientError, FatalError
+from rag_indexer.processing import process_message
 from tests.integration.conftest import _docker_is_available, _amqp_is_responsive
 
 # Static bytes served by the RAG stub's /testfile endpoint, used by cozy-json tests
