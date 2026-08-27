@@ -132,6 +132,13 @@ async def rag_upsert(
     else:
         log.debug("upsert_callback_url_absent")
 
+    # Token for OpenRAG to sign the callback. Presence is logged, never the value.
+    if msg.callback_token:
+        form.add_field("callback_token", msg.callback_token)
+        log.debug("upsert_callback_token_forwarded")
+    else:
+        log.debug("upsert_callback_token_absent")
+
     params = {}
     if msg.dir_id:
         params["parent_id"] = msg.dir_id

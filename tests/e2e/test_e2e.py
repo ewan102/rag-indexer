@@ -355,3 +355,133 @@ async def test_cozy_json_retry_xdeath_fallback(rmq):
     finally:
         await msg.ack()
         await channel.queue_delete(retry_q_name)
+
+
+# ---------------------------------------------------------------------------
+# callback_token: propagation in both wire formats
+# ---------------------------------------------------------------------------
+
+async def test_upsert_forwards_callback_token(rmq, rag_base_url, rag_state):
+    """'headers' format: callback_token -> forwarded to RAG as a form field."""
+    channel, exchange, queue = rmq
+    body = b"Document with an authenticated status callback."
+    md5 = _md5(body)
+    callback_url = "https://cozy.example/ai/index/status"
+    callback_token = "e2e-cozy-token"
+    headers = _make_upsert_headers("e2e-test-auto", "doc-cb-token", md5, rag_base_url)
+    headers["callback_url"] = callback_url
+    headers["callback_token"] = callback_token
+
+    await publish_msg(exchange, body, headers)
+    await consume_and_process(queue, rag_base_url)
+
+    posts = [
+        c for c in rag_state.call_log
+        if c["method"] == "POST" and c["file_id"] == "doc-cb-token"
+    ]
+    assert posts, "Expected a POST for doc-cb-token"
+    assert posts[-1].get("callback_token") == callback_token
+    assert posts[-1].get("callback_url") == callback_url
+
+
+async def test_upsert_without_callback_token_still_works(rmq, rag_base_url, rag_state):
+    """Optional field: an untokenised message indexes as before."""
+    channel, exchange, queue = rmq
+    body = b"Document with no callback token."
+    md5 = _md5(body)
+    headers = _make_upsert_headers("e2e-test-auto", "doc-no-token", md5, rag_base_url)
+    headers["callback_url"] = "https://cozy.example/ai/index/status"
+
+    await publish_msg(exchange, body, headers)
+    await consume_and_process(queue, rag_base_url)
+
+    posts = [
+        c for c in rag_state.call_log
+        if c["method"] == "POST" and c["file_id"] == "doc-no-token"
+    ]
+    assert posts, "Expected a POST for doc-no-token"
+    assert "callback_token" not in posts[-1]
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{rag_base_url}/partition/e2e-test-auto/file/doc-no-token"
+        ) as resp:
+            assert resp.status == 200
+
+
+async def test_cozy_json_forwards_callback_token(rmq, rag_base_url, rag_state):
+    """'cozy-json' format: callback_token read from the body, forwarded to OpenRAG."""
+    channel, exchange, queue = rmq
+    callback_token = "e2e-cozy-json-token"
+    md5 = _md5(TESTFILE_CONTENT)
+
+    await publish_cozy_json_msg(
+        exchange,
+        rag_base_url,
+        partition="e2e-cozy-json",
+        file_id="cozy-token-doc",
+        md5sum=md5,
+        callback_url="https://cozy.example/ai/index/status",
+        callback_token=callback_token,
+    )
+
+    await consume_and_process_cozy_json(queue)
+
+    posts = [
+        c for c in rag_state.call_log
+        if c["method"] == "POST" and c["file_id"] == "cozy-token-doc"
+    ]
+    assert posts, "Expected a POST for cozy-token-doc"
+    assert posts[-1].get("callback_token") == callback_token
+
+
+async def test_cozy_json_dlq_callback_is_authenticated(rmq, rag_base_url):
+    """DLQ failure callback carries the bearer token, never in the URL."""
+    channel, exchange, queue = rmq
+    callback_token = "e2e-dlq-token"
+    received = []
+
+    async def _callback(request: web.Request) -> web.Response:
+        received.append({
+            "authorization": request.headers.get("Authorization"),
+            "query": dict(request.query),
+            "body": await request.json(),
+        })
+        return web.Response(status=200)
+
+    stub_app = web.Application()
+    stub_app.router.add_post("/cb-dlq-auth", _callback)
+    callback_server = TestServer(stub_app)
+    await callback_server.start_server()
+
+    try:
+        callback_url = str(callback_server.make_url("/cb-dlq-auth"))
+        dlq_queue = await channel.declare_queue(DLQ_NAME, durable=False, auto_delete=True)
+
+        await publish_cozy_json_msg(
+            exchange,
+            rag_base_url,
+            partition="e2e-cozy-dlq-auth",
+            file_id="cozy-dlq-auth-doc",
+            callback_url=callback_url,
+            callback_token=callback_token,
+        )
+
+        msg = await asyncio.wait_for(queue.get(no_ack=False), timeout=5)
+        async with aiohttp.ClientSession() as session:
+            await publish_to_dlq(channel, msg, session)
+        await msg.ack()
+
+        await asyncio.sleep(0.2)
+
+        assert len(received) == 1
+        cb = received[0]
+        assert cb["authorization"] == f"Bearer {callback_token}"
+        # Header only -- not a query param, not in the body.
+        assert cb["query"] == {}
+        assert callback_token not in str(cb["body"])
+
+        dlq_msg = await asyncio.wait_for(dlq_queue.get(no_ack=False), timeout=5)
+        await dlq_msg.ack()
+    finally:
+        await callback_server.close()

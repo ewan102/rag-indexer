@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import aiohttp
 import pytest
@@ -435,3 +436,89 @@ async def test_upsert_get_200_no_version_no_md5sum_reindexes(
 
     assert calls["upsert"] is not None
     assert calls["upsert"]["is_new"] is False
+
+
+# ------------------------
+# callback_token: extracted from both wire formats
+# ------------------------
+async def _capture_upsert_msg(monkeypatch, dummy_msg, session_stub):
+    """Run process_message on an upsert and return the IndexMessage handed to rag_upsert."""
+    captured = {"msg": None}
+
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(404)  # needs indexing -> rag_upsert is called
+
+    async def fake_upsert(session, msg, is_new):
+        captured["msg"] = msg
+        return None
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+    await process_message(dummy_msg, session_stub)
+    assert captured["msg"] is not None
+    return captured["msg"]
+
+
+@pytest.mark.asyncio
+async def test_callback_token_extracted_from_headers_format(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """'headers' wire format: callback_token reaches the IndexMessage."""
+    headers = {
+        **headers_base,
+        "action": "upsert",
+        "callback_url": "https://cozy.example/ai/index/status",
+        "callback_token": "tok-headers",
+    }
+    msg = await _capture_upsert_msg(
+        monkeypatch, DummyMessage(body=b"", headers=headers), aiohttp_session_stub
+    )
+    assert msg.callback_token == "tok-headers"
+    assert msg.callback_url == "https://cozy.example/ai/index/status"
+
+
+@pytest.mark.asyncio
+async def test_callback_token_extracted_from_cozy_json_format(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """'cozy-json' wire format: business fields in the body, AMQP headers empty."""
+    payload = {
+        **headers_base,
+        "action": "upsert",
+        "callback_url": "https://cozy.example/ai/index/status",
+        "callback_token": "tok-cozy-json",
+    }
+    msg = await _capture_upsert_msg(
+        monkeypatch,
+        DummyMessage(body=json.dumps(payload).encode(), headers={}),
+        aiohttp_session_stub,
+    )
+    assert msg.callback_token == "tok-cozy-json"
+
+
+@pytest.mark.asyncio
+async def test_callback_token_extracted_from_cozy_json_after_retry_cycle(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """Broker-added x-death headers must not shadow the cozy-json body."""
+    payload = {**headers_base, "action": "upsert", "callback_token": "tok-after-retry"}
+    amqp_headers = {"x-death": [{"reason": "expired", "count": 1}]}
+    msg = await _capture_upsert_msg(
+        monkeypatch,
+        DummyMessage(body=json.dumps(payload).encode(), headers=amqp_headers),
+        aiohttp_session_stub,
+    )
+    assert msg.callback_token == "tok-after-retry"
+
+
+@pytest.mark.asyncio
+async def test_callback_token_absent_is_none(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """Optional field: a message without callback_token still processes."""
+    headers = {**headers_base, "action": "upsert", "callback_url": "https://cozy.example/cb"}
+    msg = await _capture_upsert_msg(
+        monkeypatch, DummyMessage(body=b"", headers=headers), aiohttp_session_stub
+    )
+    assert msg.callback_token is None
+    assert msg.callback_url == "https://cozy.example/cb"

@@ -1,7 +1,7 @@
 import pytest
 
 from rag_indexer.models import IndexMessage, RagConn, ContentSpec
-from rag_indexer.rag_client import get_producer_file, build_metadata
+from rag_indexer.rag_client import get_producer_file, build_metadata, rag_upsert
 from tests.conftest import FakeContextResp, FakeSession
 
 
@@ -149,3 +149,97 @@ def test_build_metadata_no_version_no_md5sum():
     )
     meta = build_metadata(msg)
     assert meta["version"] == ""
+
+
+# ------------------------
+# callback_token: multipart field to OpenRAG, never in the URL
+# ------------------------
+class _CapturingSession:
+    """Fake ClientSession recording the rag_upsert request."""
+
+    def __init__(self, status: int = 201):
+        self._status = status
+        self.request_call = None
+
+    def get(self, url, headers=None, timeout=None):
+        return FakeContextResp(status=200, body=b"file-bytes")
+
+    def request(self, method, url, *, data=None, params=None, headers=None, timeout=None):
+        self.request_call = {
+            "method": method,
+            "url": url,
+            "form": {
+                opts["name"]: value
+                for opts, _hdrs, value in data._fields
+                if "filename" not in opts
+            },
+            "params": params,
+            "headers": headers,
+        }
+        return _FakeRequestResp(self._status)
+
+
+class _FakeRequestResp:
+    def __init__(self, status: int):
+        self.status = status
+
+    async def text(self):
+        return ""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+
+def _upsert_msg(**kwargs) -> IndexMessage:
+    return IndexMessage(
+        action="upsert",
+        partition="p1",
+        file_id="f1",
+        name="doc.txt",
+        rag=RagConn(base_url="http://rag:8000", api_key="rag-key"),
+        content=ContentSpec(file_url="http://cozy/files/downloads/sekret/doc.txt"),
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rag_upsert_forwards_callback_token_as_form_field():
+    session = _CapturingSession()
+    msg = _upsert_msg(
+        callback_url="https://cozy.example/ai/index/status",
+        callback_token="cozy-secret-token",
+    )
+    await rag_upsert(session, msg, is_new=True)
+
+    call = session.request_call
+    assert call["form"]["callback_token"] == "cozy-secret-token"
+    assert call["form"]["callback_url"] == "https://cozy.example/ai/index/status"
+
+
+@pytest.mark.asyncio
+async def test_rag_upsert_never_puts_callback_token_in_query_string():
+    """The token must not land in params, the URL, or an auth header."""
+    session = _CapturingSession()
+    msg = _upsert_msg(callback_token="cozy-secret-token")
+    await rag_upsert(session, msg, is_new=True)
+
+    call = session.request_call
+    assert "cozy-secret-token" not in call["url"]
+    assert "cozy-secret-token" not in str(call["params"])
+    # Authorization must stay the OpenRAG api_key
+    assert call["headers"]["Authorization"] == "Bearer rag-key"
+    assert "cozy-secret-token" not in str(call["headers"])
+
+
+@pytest.mark.asyncio
+async def test_rag_upsert_omits_callback_token_when_absent():
+    """Optional field: no callback_token means no such form field."""
+    session = _CapturingSession()
+    await rag_upsert(session, _upsert_msg(callback_url="https://cozy.example/cb"), is_new=True)
+
+    call = session.request_call
+    assert "callback_token" not in call["form"]
+    assert call["form"]["callback_url"] == "https://cozy.example/cb"

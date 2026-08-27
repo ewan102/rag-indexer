@@ -104,6 +104,7 @@ async def process_message(
             content_type=headers.get("content_type"),
             app_metadata=headers.get("app_metadata"),
             callback_url=headers.get("callback_url"),
+            callback_token=headers.get("callback_token"),
             rag=RagConn(
                 base_url=headers.get("rag_base_url", ""),
                 api_key=headers.get("rag_api_key", ""),

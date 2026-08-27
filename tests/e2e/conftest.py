@@ -73,6 +73,8 @@ def _make_rag_stub_app(state: RagStubState) -> web.Application:
                 metadata = json.loads(raw)
             elif part.name == "callback_url":
                 log_entry["callback_url"] = (await part.read(decode=True)).decode()
+            elif part.name == "callback_token":
+                log_entry["callback_token"] = (await part.read(decode=True)).decode()
             elif part.name == "file":
                 # consume to avoid hanging
                 await part.read(decode=False)
@@ -297,6 +299,7 @@ async def publish_cozy_json_msg(
     name: str = "test.txt",
     content_type: str = "text/plain",
     callback_url: str = "",
+    callback_token: str = "",
     amqp_headers: dict | None = None,
     **extra,
 ) -> bytes:
@@ -321,6 +324,8 @@ async def publish_cozy_json_msg(
     }
     if callback_url:
         payload["callback_url"] = callback_url
+    if callback_token:
+        payload["callback_token"] = callback_token
 
     body_json = json.dumps(payload).encode()
     await exchange.publish(

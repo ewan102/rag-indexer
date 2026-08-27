@@ -129,8 +129,15 @@ async def publish_to_dlq(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "metadata": _file_metadata(metadata),
     }
+    # The status route is authenticated: sign our POST with the message token.
+    callback_token = metadata.get("callback_token")
+    callback_headers = (
+        {"Authorization": f"Bearer {callback_token}"} if callback_token else None
+    )
     try:
-        async with session.post(callback_url, json=payload, timeout=CALLBACK_TIMEOUT) as resp:
+        async with session.post(
+            callback_url, json=payload, headers=callback_headers, timeout=CALLBACK_TIMEOUT
+        ) as resp:
             resp.raise_for_status()
         log.info("dlq_callback_sent", callback_url=callback_url)
     except Exception as e:

@@ -31,5 +31,6 @@ class IndexMessage(BaseModel):
     content_type: str | None = None
     app_metadata: dict | None = None
     callback_url: str | None = None
+    callback_token: str | None = None  # secret: never logged, never in a URL
     rag: RagConn
     content: ContentSpec | None = None
