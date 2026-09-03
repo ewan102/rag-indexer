@@ -14,7 +14,6 @@ class RagConn(BaseModel):
 
 
 class ContentSpec(BaseModel):
-    note_markdown: str | None = None
     file_url: str | None = None
 
 
@@ -23,7 +22,7 @@ class IndexMessage(BaseModel):
     partition: str
     file_id: str
     doctype: str | None = None
-    version: str | None = None
+    doc_rev: str | None = None  # CouchDB revision; cozy orders the status callbacks on it
     md5sum: str | None = None
     name: str | None = None
     dir_id: str | None = None

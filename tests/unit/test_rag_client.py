@@ -1,7 +1,12 @@
 import pytest
 
 from rag_indexer.models import IndexMessage, RagConn, ContentSpec
-from rag_indexer.rag_client import get_producer_file, build_metadata, rag_upsert
+from rag_indexer.rag_client import (
+    get_producer_file,
+    build_metadata,
+    callback_metadata,
+    rag_upsert,
+)
 from tests.conftest import FakeContextResp, FakeSession
 
 
@@ -34,14 +39,14 @@ def test_build_metadata_merges_app_metadata():
         partition="p1",
         file_id="f1",
         rag=RagConn(base_url="http://rag:8000", api_key="key"),
-        version="v1",
+        doc_rev="3-abc",
         doctype="pdf",
         app_metadata={"custom_key": "custom_value", "author": "test"},
     )
     meta = build_metadata(msg)
     assert meta["custom_key"] == "custom_value"
     assert meta["author"] == "test"
-    assert meta["version"] == "v1"
+    assert meta["doc_rev"] == "3-abc"
     assert meta["doctype"] == "pdf"
 
 
@@ -51,14 +56,45 @@ def test_build_metadata_without_app_metadata():
         partition="p1",
         file_id="f1",
         rag=RagConn(base_url="http://rag:8000", api_key="key"),
-        version="v1",
+        doc_rev="3-abc",
         doctype="pdf",
     )
     meta = build_metadata(msg)
-    assert meta["version"] == "v1"
+    assert meta["doc_rev"] == "3-abc"
     assert meta["doctype"] == "pdf"
     # No extra keys beyond the base fields
     assert "custom_key" not in meta
+
+
+def test_build_metadata_exposes_md5sum_as_its_own_key():
+    """cozy-stack's indexedMD5Sum reads metadata["md5sum"] on the existence GET."""
+    msg = IndexMessage(
+        action="upsert",
+        partition="p1",
+        file_id="f1",
+        rag=RagConn(base_url="http://rag:8000", api_key="key"),
+        doc_rev="3-abc",
+        md5sum="d41d8cd98f00b204e9800998ecf8427e",
+    )
+    meta = build_metadata(msg)
+    assert meta["md5sum"] == "d41d8cd98f00b204e9800998ecf8427e"
+    assert meta["doc_rev"] == "3-abc"
+
+
+def test_build_metadata_never_substitutes_md5sum_for_doc_rev():
+    """A md5sum has generation 0 for cozy's revision.Generation: every later
+    status would be silently dropped as outdated. Empty is the only safe value.
+    """
+    msg = IndexMessage(
+        action="upsert",
+        partition="p1",
+        file_id="f1",
+        rag=RagConn(base_url="http://rag:8000", api_key="key"),
+        md5sum="d41d8cd98f00b204e9800998ecf8427e",
+    )
+    meta = build_metadata(msg)
+    assert meta["doc_rev"] == ""
+    assert meta["md5sum"] == "d41d8cd98f00b204e9800998ecf8427e"
 
 
 # ------------------------
@@ -92,18 +128,32 @@ async def test_get_producer_file_no_auth_header():
 # NEW: Metadata edge cases (TEST-03, TEST-04)
 # ------------------------
 def test_build_metadata_app_metadata_overrides_base_keys():
-    """app_metadata containing 'version' should override the base version field."""
+    """app_metadata still wins on the descriptive fields."""
     msg = IndexMessage(
         action="upsert",
         partition="p1",
         file_id="f1",
         rag=RagConn(base_url="http://rag:8000", api_key="key"),
-        version="v1",
+        doc_rev="3-abc",
         doctype="pdf",
-        app_metadata={"version": "custom_version"},
+        app_metadata={"doctype": "custom_doctype"},
     )
     meta = build_metadata(msg)
-    assert meta["version"] == "custom_version"
+    assert meta["doctype"] == "custom_doctype"
+
+
+def test_build_metadata_app_metadata_cannot_override_doc_rev():
+    """Callbacks are ordered on doc_rev: application metadata must not displace it."""
+    msg = IndexMessage(
+        action="upsert",
+        partition="p1",
+        file_id="f1",
+        rag=RagConn(base_url="http://rag:8000", api_key="key"),
+        doc_rev="3-abc",
+        app_metadata={"doc_rev": "9-forged"},
+    )
+    meta = build_metadata(msg)
+    assert meta["doc_rev"] == "3-abc"
 
 
 def test_build_metadata_empty_dict_app_metadata():
@@ -113,15 +163,15 @@ def test_build_metadata_empty_dict_app_metadata():
         partition="p1",
         file_id="f1",
         rag=RagConn(base_url="http://rag:8000", api_key="key"),
-        version="v1",
+        doc_rev="3-abc",
         doctype="pdf",
         app_metadata={},
     )
     meta = build_metadata(msg)
-    assert meta["version"] == "v1"
+    assert meta["doc_rev"] == "3-abc"
     assert meta["doctype"] == "pdf"
     assert meta["datetime"] == ""
-    assert len(meta) == 3  # only base fields
+    assert set(meta) == {"doc_rev", "md5sum", "datetime", "doctype"}
 
 
 def test_build_metadata_none_values_in_app_metadata():
@@ -131,16 +181,16 @@ def test_build_metadata_none_values_in_app_metadata():
         partition="p1",
         file_id="f1",
         rag=RagConn(base_url="http://rag:8000", api_key="key"),
-        version="v1",
+        doc_rev="3-abc",
         app_metadata={"extra": None},
     )
     meta = build_metadata(msg)
     assert meta["extra"] is None
-    assert meta["version"] == "v1"
+    assert meta["doc_rev"] == "3-abc"
 
 
-def test_build_metadata_no_version_no_md5sum():
-    """Both version and md5sum are None -- meta['version'] should fallback to empty string."""
+def test_build_metadata_no_doc_rev_no_md5sum():
+    """Neither field set -- both fall back to the empty string, never to each other."""
     msg = IndexMessage(
         action="upsert",
         partition="p1",
@@ -148,7 +198,34 @@ def test_build_metadata_no_version_no_md5sum():
         rag=RagConn(base_url="http://rag:8000", api_key="key"),
     )
     meta = build_metadata(msg)
-    assert meta["version"] == ""
+    assert meta["doc_rev"] == ""
+    assert meta["md5sum"] == ""
+
+
+def test_callback_metadata_narrows_to_what_cozy_reads():
+    """callback_metadata() is our own narrowing for the DLQ failure callback, down
+    to what cozy's handler reads (doc_rev) plus datetime/doctype. It is not what
+    OpenRAG does: OpenRAG's real success callback echoes every metadata key except
+    its own server-computed ones, so it also carries md5sum and app_metadata.
+    """
+    upsert_meta = build_metadata(
+        IndexMessage(
+            action="upsert",
+            partition="p1",
+            file_id="f1",
+            rag=RagConn(base_url="http://rag:8000", api_key="key"),
+            doc_rev="3-abc",
+            md5sum="d41d8cd98f00b204e9800998ecf8427e",
+            datetime="2026-01-15T12:00:00Z",
+            doctype="io.cozy.files",
+            app_metadata={"custom": "value"},
+        )
+    )
+    assert callback_metadata(upsert_meta) == {
+        "doc_rev": "3-abc",
+        "datetime": "2026-01-15T12:00:00Z",
+        "doctype": "io.cozy.files",
+    }
 
 
 # ------------------------

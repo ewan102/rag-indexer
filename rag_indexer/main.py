@@ -133,17 +133,14 @@ async def main():
             log.info("consumer_started", concurrency=CONCURRENCY)
             await shutdown_event.wait()
         finally:
-            # --- Shutdown drain ---
             log.warning("shutdown_drain_start", in_flight=len(in_flight))
 
-            # Cancel consumer -- stop receiving new messages
             if consumer_tag is not None:
                 try:
                     await queue.cancel(consumer_tag)
                 except Exception:
                     pass  # Channel may already be closed
 
-            # Drain in-flight tasks with 10s timeout
             if in_flight:
                 log.info("draining_tasks", count=len(in_flight))
                 try:

@@ -14,13 +14,11 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=".env")
 
-# ---------- Config via env ----------
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 EXCHANGE_NAME = os.getenv("EXCHANGE_NAME", "rag.index.topic")
 # Main queue binds "rag.index.*"; retry queues dead-letter back on "rag.index.retry".
 ROUTING_KEY = os.getenv("ROUTING_KEY", "rag.index.file")
 
-# RAG fields (can also be passed via CLI)
 RAG_BASE_URL = os.getenv("RAG_BASE_URL", "")
 RAG_API_KEY = os.getenv("RAG_API_KEY", "")
 
@@ -48,6 +46,7 @@ def build_headers(
     rag_base_url: str,
     rag_api_key: str,
     doctype: str | None = None,
+    doc_rev: str | None = None,
     md5sum: str | None = None,
     name: str | None = None,
     dir_id: str | None = None,
@@ -65,6 +64,8 @@ def build_headers(
     }
     if doctype:
         h["doctype"] = doctype
+    if doc_rev:
+        h["doc_rev"] = doc_rev
     if md5sum:
         h["md5sum"] = md5sum
     if name:
@@ -128,9 +129,7 @@ async def publish_message(
         await ex.publish(msg, routing_key=routing_key)
 
 
-# ---------- Subcommands ----------
 async def cmd_upsert_file(args: argparse.Namespace) -> None:
-    # Read file (or stdin)
     if args.path == "-":
         data = sys.stdin.buffer.read()
         filename = args.name or f"{args.file_id}.bin"
@@ -154,6 +153,7 @@ async def cmd_upsert_file(args: argparse.Namespace) -> None:
         rag_base_url=args.rag_base_url or RAG_BASE_URL,
         rag_api_key=args.rag_api_key or RAG_API_KEY,
         doctype=args.doctype,
+        doc_rev=args.doc_rev,
         md5sum=md5sum,
         name=filename,
         dir_id=args.dir_id,
@@ -169,7 +169,6 @@ async def cmd_upsert_file(args: argparse.Namespace) -> None:
 
 
 async def cmd_upsert_url(args: argparse.Namespace) -> None:
-    # No body here; consumer will download via file_url
     if not args.file_url:
         print("--file-url is required for upsert-url", file=sys.stderr)
         sys.exit(2)
@@ -182,6 +181,7 @@ async def cmd_upsert_url(args: argparse.Namespace) -> None:
         rag_base_url=args.rag_base_url or RAG_BASE_URL,
         rag_api_key=args.rag_api_key or RAG_API_KEY,
         doctype=args.doctype,
+        doc_rev=args.doc_rev,
         md5sum=args.md5sum,
         name=args.name,
         dir_id=args.dir_id,
@@ -223,6 +223,10 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--rag-base-url", help="Override RAG base URL (fallback: RAG_BASE_URL)")
     p.add_argument("--rag-api-key", help="Override RAG API key (fallback: RAG_API_KEY)")
     p.add_argument("--doctype", help="Document type (optional)")
+    p.add_argument(
+        "--doc-rev",
+        help="CouchDB revision of the file (e.g. 3-abc); echoed back on the status callback",
+    )
     p.add_argument("--md5sum", help="Expected MD5 (computed from file if absent for upsert-file)")
     p.add_argument("--name", help="Display name/filename")
     p.add_argument("--dir-id", help="Parent directory (optional)")

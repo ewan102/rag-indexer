@@ -96,7 +96,7 @@ async def process_message(
             partition=headers.get("partition") or "",
             file_id=headers.get("file_id"),
             doctype=headers.get("doctype"),
-            version=headers.get("version"),
+            doc_rev=headers.get("doc_rev"),
             md5sum=headers.get("md5sum"),
             name=headers.get("name"),
             dir_id=headers.get("dir_id"),
@@ -123,7 +123,7 @@ async def process_message(
             raise FatalError(f"RAG delete {resp.status}: {resp.text}")
 
         if msg.action == "upsert":
-            log.debug("rag_get_file", detail="checking current version")
+            log.debug("rag_get_file", detail="checking indexed content")
             resp = await rag_client.rag_get_file(session, msg.rag, msg.partition, msg.file_id)
             if resp.status == 429 or resp.status >= 500:
                 log.debug("rag_get_error", status=resp.status)
@@ -134,9 +134,11 @@ async def process_message(
             if resp.status == 200:
                 doc = resp.json_data or {}
                 doc_metadata = (doc.get("metadata") or {}) if isinstance(doc, dict) else {}
-                version_remote = doc_metadata.get("version") or doc_metadata.get("md5sum")  # retro compat
-                version_local = msg.version or msg.md5sum
-                if not version_remote or (version_local and version_remote != version_local):
+                # Deduplication is on the content, not on doc_rev: a rename or a move
+                # bumps the revision without changing a byte of the file.
+                # "version" is where the previous producer stored the md5sum.
+                md5_remote = doc_metadata.get("md5sum") or doc_metadata.get("version")
+                if not md5_remote or (msg.md5sum and md5_remote != msg.md5sum):
                     need_index = True
             elif resp.status == 404:
                 need_index = True

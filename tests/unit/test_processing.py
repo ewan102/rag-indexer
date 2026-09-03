@@ -150,7 +150,7 @@ async def test_upsert_new_on_404_triggers_post(
 
 
 # ------------------------
-# UPSERT path - GET 200 => version different => PUT (is_new=False)
+# UPSERT path - GET 200 => md5sum different => PUT (is_new=False)
 # ------------------------
 @pytest.mark.asyncio
 async def test_upsert_update_on_md5_change_triggers_put(
@@ -159,8 +159,7 @@ async def test_upsert_update_on_md5_change_triggers_put(
     calls = {"upsert": None}
 
     async def fake_get(session, rag, partition, file_id):
-        # Document exists with version "OLD"
-        return FakeResp(200, json_data={"metadata": {"version": "OLD"}})
+        return FakeResp(200, json_data={"metadata": {"md5sum": "OLD"}})
 
     async def fake_upsert(session, msg, is_new):
         calls["upsert"] = {"is_new": is_new}
@@ -170,13 +169,84 @@ async def test_upsert_update_on_md5_change_triggers_put(
     monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
 
     body = b"PDFDATA"
-    headers = {**headers_base, "action": "upsert", "version": "NEW"}
+    headers = {**headers_base, "action": "upsert", "md5sum": "NEW"}
     msg = DummyMessage(body=body, headers=headers)
 
     await process_message(msg, aiohttp_session_stub)
 
     assert calls["upsert"] is not None
     assert calls["upsert"]["is_new"] is False
+
+
+@pytest.mark.asyncio
+async def test_upsert_same_md5_new_doc_rev_skips(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """A rename or a move bumps the revision without touching the content:
+    deduplication is on md5sum, so nothing is re-indexed.
+    """
+    called = {"upsert": False}
+
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(200, json_data={"metadata": {"md5sum": "SAME", "doc_rev": "3-old"}})
+
+    async def fake_upsert(session, msg, is_new):
+        called["upsert"] = True
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+
+    headers = {**headers_base, "action": "upsert", "md5sum": "SAME", "doc_rev": "4-new"}
+    msg = DummyMessage(body=b"ignored", headers=headers)
+
+    await process_message(msg, aiohttp_session_stub)
+    assert called["upsert"] is False
+
+
+@pytest.mark.asyncio
+async def test_upsert_reads_legacy_version_key_as_md5sum(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    """Documents indexed by the previous producer carry their md5sum under
+    "version": re-reading it avoids re-indexing the whole corpus once.
+    """
+    called = {"upsert": False}
+
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(200, json_data={"metadata": {"version": "SAME"}})
+
+    async def fake_upsert(session, msg, is_new):
+        called["upsert"] = True
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+
+    headers = {**headers_base, "action": "upsert", "md5sum": "SAME"}
+    msg = DummyMessage(body=b"ignored", headers=headers)
+
+    await process_message(msg, aiohttp_session_stub)
+    assert called["upsert"] is False
+
+
+@pytest.mark.asyncio
+async def test_upsert_forwards_doc_rev_from_the_message(
+    monkeypatch, headers_base, aiohttp_session_stub
+):
+    captured = {}
+
+    async def fake_get(session, rag, partition, file_id):
+        return FakeResp(404)
+
+    async def fake_upsert(session, msg, is_new):
+        captured["doc_rev"] = msg.doc_rev
+
+    monkeypatch.setattr(rag_client, "rag_get_file", fake_get)
+    monkeypatch.setattr(rag_client, "rag_upsert", fake_upsert)
+
+    headers = {**headers_base, "action": "upsert", "doc_rev": "3-abc"}
+    await process_message(DummyMessage(body=b"data", headers=headers), aiohttp_session_stub)
+
+    assert captured["doc_rev"] == "3-abc"
 
 
 # ------------------------
@@ -410,12 +480,12 @@ async def test_upsert_post_409_conflict_does_not_raise(
 
 
 @pytest.mark.asyncio
-async def test_upsert_get_200_no_version_no_md5sum_reindexes(
+async def test_upsert_get_200_no_md5sum_reindexes(
     monkeypatch, headers_base, aiohttp_session_stub
 ):
-    """GET returns 200 with empty metadata (no version/md5sum).
+    """GET returns 200 with empty metadata (no md5sum).
 
-    When msg has no version either, version_remote is falsy so need_index=True.
+    The remote md5sum is falsy so need_index=True.
     Assert rag_upsert is called with is_new=False.
     """
     calls = {"upsert": None}

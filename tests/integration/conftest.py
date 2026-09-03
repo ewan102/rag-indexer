@@ -13,8 +13,6 @@ import rag_indexer.transport as transport
 from rag_indexer.transport import declare_topology
 
 
-# ---------- Docker availability ----------
-
 def _docker_is_available() -> bool:
     """Check if the Docker CLI is available and the daemon is running."""
     if not shutil.which("docker"):
@@ -50,8 +48,6 @@ def _amqp_is_responsive(url: str) -> bool:
         return False
 
 
-# ---------- Auto-skip for broker-dependent tests ----------
-
 @pytest.fixture(scope="session")
 def require_broker():
     """Skip tests that need a real RabbitMQ broker when Docker is not available.
@@ -65,8 +61,6 @@ def require_broker():
     if not _docker_is_available():
         pytest.skip("Docker not available -- skipping broker integration tests")
 
-
-# ---------- pytest-docker fixtures ----------
 
 @pytest.fixture(scope="session")
 def docker_compose_file(pytestconfig):
@@ -91,8 +85,6 @@ def rabbitmq_url(docker_ip, docker_services):
     )
     return url
 
-
-# ---------- Test topology with short TTLs ----------
 
 TEST_EXCHANGE = "test.retry.topic"
 TEST_QUEUE = "test.retry.main.q"
@@ -127,7 +119,6 @@ async def rmq_channel(rabbitmq_url, monkeypatch):
     connection = await aio_pika.connect(rabbitmq_url)
     channel = await connection.channel()
 
-    # Declare test topology (creates exchange, queues, bindings)
     main_q = await declare_topology(channel)
 
     # Purge all queues for clean state

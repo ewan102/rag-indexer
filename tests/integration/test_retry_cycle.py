@@ -15,7 +15,7 @@ from aio_pika import Message, DeliveryMode
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from rag_indexer import rag_client
+from rag_indexer import rag_client, transport
 from rag_indexer.errors import FatalError, TransientError
 from rag_indexer.processing import process_message, get_retry_count, next_retry_queue
 from rag_indexer.transport import publish_to_retry, publish_to_dlq
@@ -190,7 +190,7 @@ async def test_dlq_failed_callback_is_posted(rmq_channel):
             "file_id": "doc-dlq",
             "partition": "user-dlq",
             "callback_url": callback_url,
-            "version": "v1",
+            "doc_rev": "3-abc",
             "doctype": "io.cozy.files",
             "datetime": "2026-01-15T12:00:00Z",
         }
@@ -202,6 +202,9 @@ async def test_dlq_failed_callback_is_posted(rmq_channel):
 
         async with aiohttp.ClientSession() as session:
             await publish_to_dlq(channel, msg, session)
+            # The failure callback is now a detached fire-and-forget task: let it
+            # finish while the session is still open, before this `with` closes it.
+            await asyncio.gather(*transport._callback_tasks)
         await msg.ack()
 
         # 1) Message landed in the DLQ.
@@ -217,7 +220,7 @@ async def test_dlq_failed_callback_is_posted(rmq_channel):
         assert cb["file_id"] == "doc-dlq"
         assert cb["status"] == "error"
         assert cb["metadata"] == {
-            "version": "v1",
+            "doc_rev": "3-abc",
             "datetime": "2026-01-15T12:00:00Z",
             "doctype": "io.cozy.files",
         }
@@ -271,14 +274,14 @@ async def test_transient_error_then_success_on_retry(rmq_channel, monkeypatch):
 
 
 async def test_concurrent_messages_same_file(rmq_channel, monkeypatch):
-    """2 messages with same file_id processed sequentially — second is a no-op (same version)."""
+    """2 messages with same file_id processed sequentially — second is a no-op (same md5sum)."""
     channel, main_q, dlq = rmq_channel
 
     body = b"# Concurrent test\n\nMeme contenu.\n"
     md5sum = hashlib.md5(body).hexdigest()
 
     # Tiny in-memory RAG store: first GET misses (404), fake_upsert "persists"
-    # the md5sum, second GET hits with a matching version so need_index=False.
+    # the md5sum, second GET hits with a matching md5sum so need_index=False.
     store: dict[str, str] = {}
 
     async def fake_get(session, rag, partition, file_id):

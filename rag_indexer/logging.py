@@ -17,10 +17,8 @@ SENSITIVE_KEYS = frozenset({
     "secret",
 })
 
-# Keys whose value is a URL that may carry secrets in the path or query string.
-# We keep scheme://host for debugging; the rest is redacted.
-# For cozy-stack download URLs (/downloads/<secret>/...) we keep the prefix up
-# to /downloads/ as an extra breadcrumb.
+# Keys whose value is a URL that may carry secrets in the path or query string;
+# see _redact_url for what's kept.
 URL_KEYS = frozenset({"file_url", "callback_url"})
 
 

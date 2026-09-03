@@ -78,7 +78,6 @@ class MockRAGState:
 
 state = MockRAGState()
 
-# Route patterns
 PARTITION_FILE_RE = re.compile(r"^/partition/([^/]+)/file/([^/]+)$")
 INDEXER_FILE_RE = re.compile(r"^/indexer/partition/([^/]+)/file/([^/]+)$")
 
@@ -144,13 +143,10 @@ class MockRAGHandler(BaseHTTPRequestHandler):
         self._send_json(status_code, {"task_status_url": f"/indexer/task/mock-{file_id}"})
         return True
 
-    # --- RAG API endpoints ---
-
     def do_GET(self):
         state.log_request("GET", self.path)
         path = urlparse(self.path).path
 
-        # GET /partition/{partition}/file/{file_id} - lookup
         m = PARTITION_FILE_RE.match(path)
         if m:
             partition, file_id = m.group(1), m.group(2)
@@ -167,12 +163,10 @@ class MockRAGHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"detail": "Not Found"})
             return
 
-        # GET /mock/files - list all indexed files
         if path == "/mock/files":
             self._send_json(200, state.list_files())
             return
 
-        # GET /mock/files/{file_id} - get specific file
         if path.startswith("/mock/files/"):
             file_id = path[len("/mock/files/"):]
             f = state.get_file(file_id)
@@ -182,12 +176,10 @@ class MockRAGHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "not found"})
             return
 
-        # GET /mock/requests - debug log
         if path == "/mock/requests":
             self._send_json(200, state.get_requests())
             return
 
-        # GET /health
         if path == "/health":
             self._send_json(200, {"status": "healthy"})
             return
@@ -202,7 +194,6 @@ class MockRAGHandler(BaseHTTPRequestHandler):
         if self._handle_upsert(body, 201):
             return
 
-        # POST /mock/fail/{file_id}?count=N - set failure count
         if path.startswith("/mock/fail/"):
             file_id = path[len("/mock/fail/"):]
             qs = parse_qs(urlparse(self.path).query)
@@ -226,7 +217,6 @@ class MockRAGHandler(BaseHTTPRequestHandler):
         state.log_request("DELETE", self.path)
         path = urlparse(self.path).path
 
-        # DELETE /indexer/partition/{partition}/file/{file_id}
         m = INDEXER_FILE_RE.match(path)
         if m:
             partition, file_id = m.group(1), m.group(2)
@@ -237,7 +227,6 @@ class MockRAGHandler(BaseHTTPRequestHandler):
             self._send_empty(204)
             return
 
-        # DELETE /mock/reset - clear all state
         if path == "/mock/reset":
             state.reset()
             self._send_json(200, {"status": "reset"})

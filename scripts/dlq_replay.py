@@ -24,9 +24,8 @@ import aio_pika
 from aio_pika import DeliveryMode
 
 from rag_indexer.config import RABBITMQ_URL, DLQ_NAME, EXCHANGE_NAME
+from rag_indexer.processing import extract_metadata
 
-
-# ---------- Header serialization ----------
 
 def _serialize_value(value):
     """Recursively convert non-JSON-serializable values."""
@@ -48,8 +47,6 @@ def _serialize_headers(headers: dict) -> dict:
     return {str(k): _serialize_value(v) for k, v in headers.items()}
 
 
-# ---------- Replay helper ----------
-
 async def _replay_one(msg, channel, exchange):
     """Republish a single message to the main exchange with x-death headers stripped."""
     headers = dict(msg.headers or {})
@@ -67,32 +64,39 @@ async def _replay_one(msg, channel, exchange):
     await msg.ack()
 
 
-# ---------- Subcommands ----------
-
 async def cmd_list(args: argparse.Namespace) -> None:
-    """List all messages in the DLQ as JSON lines."""
+    """List all messages in the DLQ as JSON lines.
+
+    Bounded by the queue's message count at declare time, and messages are left
+    unacked (not nacked): nacking with requeue=True here would put a message right
+    back at the head of the queue, where the next get() picks it right back up --
+    an infinite loop on any non-empty queue. Leaving them unacked instead relies on
+    the connection close below to requeue everything in bulk, exactly once.
+    """
     connection = await aio_pika.connect(RABBITMQ_URL)
     async with connection:
         channel = await connection.channel()
         queue = await channel.declare_queue(DLQ_NAME, passive=True)
 
+        total = queue.declaration_result.message_count
         count = 0
-        while True:
+        for _ in range(total):
             msg = await queue.get(no_ack=False, fail=False)
             if msg is None:
                 break
 
-            headers = _serialize_headers(msg.headers or {})
+            metadata = extract_metadata(msg)
             info = {
                 "message_id": msg.message_id,
-                "headers": headers,
+                "file_id": metadata.get("file_id"),
+                "partition": metadata.get("partition"),
+                "headers": _serialize_headers(msg.headers or {}),
                 "body_size": len(msg.body),
                 "content_type": msg.content_type,
                 "routing_key": msg.routing_key,
                 "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
             }
             print(json.dumps(info))
-            await msg.nack(requeue=True)
             count += 1
 
         print(json.dumps({"total": count}), file=sys.stderr)
@@ -113,38 +117,34 @@ async def cmd_replay(args: argparse.Namespace) -> None:
         queue = await channel.declare_queue(DLQ_NAME, passive=True)
         exchange = await channel.declare_exchange(EXCHANGE_NAME, passive=True)
 
-        if args.all:
-            # First pass: count messages
-            messages_count = 0
-            while True:
-                msg = await queue.get(no_ack=False, fail=False)
-                if msg is None:
-                    break
-                await msg.nack(requeue=True)
-                messages_count += 1
+        # Bounded by the count at declare time; a message not replayed in this pass
+        # is left unacked and gets requeued in bulk when the connection closes below
+        # -- nack(requeue=True) mid-scan would put it back where the next get() picks
+        # it right back up, looping forever on a non-empty queue.
+        total = queue.declaration_result.message_count
 
-            if messages_count == 0:
+        if args.all:
+            if total == 0:
                 print("No messages in DLQ", file=sys.stderr)
                 return
 
-            # Prompt for confirmation
-            answer = input(f"Replay all {messages_count} messages? [y/N] ").strip().lower()
+            answer = input(f"Replay all {total} messages? [y/N] ").strip().lower()
             if answer != "y":
                 print("Aborted", file=sys.stderr)
                 return
 
-            # Second pass: replay all
             replayed = 0
-            while True:
+            for _ in range(total):
                 msg = await queue.get(no_ack=False, fail=False)
                 if msg is None:
                     break
 
-                headers = _serialize_headers(msg.headers or {})
+                metadata = extract_metadata(msg)
                 info = {
                     "replayed": True,
                     "message_id": msg.message_id,
-                    "headers": headers,
+                    "file_id": metadata.get("file_id"),
+                    "partition": metadata.get("partition"),
                     "body_size": len(msg.body),
                 }
                 await _replay_one(msg, channel, exchange)
@@ -154,38 +154,32 @@ async def cmd_replay(args: argparse.Namespace) -> None:
             print(json.dumps({"total_replayed": replayed}), file=sys.stderr)
 
         else:
-            # Single replay by file_id
             found = False
             checked = 0
-            while True:
+            for _ in range(total):
                 msg = await queue.get(no_ack=False, fail=False)
                 if msg is None:
                     break
 
-                msg_headers = msg.headers or {}
-                if msg_headers.get("file_id") == args.file_id:
-                    headers = _serialize_headers(msg_headers)
+                metadata = extract_metadata(msg)
+                if metadata.get("file_id") == args.file_id:
                     info = {
                         "replayed": True,
                         "message_id": msg.message_id,
                         "file_id": args.file_id,
-                        "headers": headers,
+                        "partition": metadata.get("partition"),
                         "body_size": len(msg.body),
                     }
                     await _replay_one(msg, channel, exchange)
                     print(json.dumps(info))
                     found = True
                     break
-                else:
-                    await msg.nack(requeue=True)
-                    checked += 1
+                checked += 1
 
             if not found:
                 print(f"No message found with file_id={args.file_id} (checked {checked} messages)", file=sys.stderr)
                 sys.exit(1)
 
-
-# ---------- CLI ----------
 
 def make_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(

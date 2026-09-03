@@ -22,7 +22,6 @@ from rag_indexer.processing import extract_metadata
 log = structlog.get_logger()
 
 
-# ---------- Shutdown coordination ----------
 shutdown_event = asyncio.Event()
 
 
@@ -32,7 +31,6 @@ def request_shutdown():
     shutdown_event.set()
 
 
-# ---------- Health endpoint ----------
 async def health_handler(request):
     """Minimal health check -- returns 200 if RabbitMQ connection is alive."""
     connection = request.app["rmq_connection"]
@@ -54,16 +52,43 @@ async def start_health_server(connection, host="0.0.0.0", port=8080):
     return runner
 
 
-# ---------- Retry / DLQ publishing ----------
 def _file_metadata(metadata: dict) -> dict:
-    """File metadata echoed to the cozy callback -- same mapping as rag_client.build_metadata."""
-    return rag_client.metadata_dict(
-        version=metadata.get("version"),
-        md5sum=metadata.get("md5sum"),
-        datetime=metadata.get("datetime"),
-        doctype=metadata.get("doctype"),
-        app_metadata=metadata.get("app_metadata"),
+    """File metadata echoed to the cozy callback.
+
+    Narrowed to what cozy's handler actually reads (metadata.doc_rev) plus
+    datetime/doctype for readability -- see callback_metadata().
+    """
+    return rag_client.callback_metadata(
+        rag_client.metadata_dict(
+            doc_rev=metadata.get("doc_rev"),
+            md5sum=metadata.get("md5sum"),
+            datetime=metadata.get("datetime"),
+            doctype=metadata.get("doctype"),
+            app_metadata=metadata.get("app_metadata"),
+        )
     )
+
+
+# Fire-and-forget failure-callback POSTs, tracked so asyncio doesn't garbage-collect
+# them mid-flight; publish_to_dlq returns as soon as the DLQ publish is confirmed
+# instead of holding the caller's concurrency slot for the callback's HTTP round trip.
+_callback_tasks: set[asyncio.Task] = set()
+
+
+async def _post_dlq_callback(
+    session: aiohttp.ClientSession,
+    callback_url: str,
+    payload: dict,
+    headers: dict | None,
+) -> None:
+    try:
+        async with session.post(
+            callback_url, json=payload, headers=headers, timeout=CALLBACK_TIMEOUT
+        ) as resp:
+            resp.raise_for_status()
+        log.info("dlq_callback_sent", callback_url=callback_url)
+    except Exception as e:
+        log.warning("dlq_callback_failed", callback_url=callback_url, error=str(e))
 
 
 async def publish_to_retry(
@@ -121,30 +146,31 @@ async def publish_to_dlq(
 
     # publish_to_dlq is only the terminal failure path (retries exhausted), so the
     # status is always "error" -- the canonical vocabulary expected by cozy-stack's
-    # SetRAGStatus. timestamp is captured at POST time, ISO 8601 UTC.
+    # SetIndexStatus.
     payload = {
         "partition": metadata.get("partition"),
         "file_id": metadata.get("file_id"),
         "status": "error",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        # Milliseconds and a "Z" suffix: the spelling cozy-stack documents and the one
+        # OpenRAG emits, so both callback producers write the same timestamp.
+        "timestamp": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
         "metadata": _file_metadata(metadata),
     }
-    # The status route is authenticated: sign our POST with the message token.
+    # Sent when the message carries one: the cozy status route does not check a token
+    # yet, but OpenRAG signs its own callback the same way.
     callback_token = metadata.get("callback_token")
     callback_headers = (
         {"Authorization": f"Bearer {callback_token}"} if callback_token else None
     )
-    try:
-        async with session.post(
-            callback_url, json=payload, headers=callback_headers, timeout=CALLBACK_TIMEOUT
-        ) as resp:
-            resp.raise_for_status()
-        log.info("dlq_callback_sent", callback_url=callback_url)
-    except Exception as e:
-        log.warning("dlq_callback_failed", callback_url=callback_url, error=str(e))
+    task = asyncio.create_task(
+        _post_dlq_callback(session, callback_url, payload, callback_headers)
+    )
+    _callback_tasks.add(task)
+    task.add_done_callback(_callback_tasks.discard)
 
 
-# ---------- Topology declaration ----------
 async def declare_topology(channel: aio_pika.Channel) -> aio_pika.Queue:
     """Declare exchanges, queues, and bindings. Returns the main queue."""
     # Main exchange (topic, durable)

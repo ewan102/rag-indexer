@@ -1,9 +1,6 @@
 import pytest
 
 
-# ------------------------
-# Helpers & fakes
-# ------------------------
 class FakeResp:
     """Mimics RagResponse returned by rag_get_file / rag_delete."""
     def __init__(self, status: int, json_data=None, text_data=""):

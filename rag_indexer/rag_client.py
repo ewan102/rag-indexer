@@ -73,33 +73,54 @@ async def get_producer_file(session: aiohttp.ClientSession, msg: IndexMessage) -
         raise TransientError(f"Network error fetching file_url: {e}") from e
 
 
+# cozy-stack's callback handler reads only metadata.doc_rev (web/ai/index_status.go).
+# OpenRAG itself has no fixed field list: indexing_callback.py echoes every metadata
+# key except its own server-computed ones (UPLOAD_METADATA_SERVER_KEYS in
+# core/utils/conts.py), so its real success callback also carries md5sum and any
+# app_metadata. This keeps our own DLQ failure callback to what cozy actually reads,
+# plus datetime/doctype for readability.
+_ECHOED_METADATA_FIELDS = ("doc_rev", "datetime", "doctype")
+
+
 def metadata_dict(
     *,
-    version: str | None,
+    doc_rev: str | None,
     md5sum: str | None,
     datetime: str | None,
     doctype: str | None,
     app_metadata: dict | None,
 ) -> dict[str, Any]:
-    """Shared field mapping for metadata sent to OpenRAG or echoed to the cozy callback."""
+    """Metadata stored on the OpenRAG document.
+
+    doc_rev is never filled in from another field: cozy-stack reads it as a CouchDB
+    revision, and anything else has generation 0 there, which makes every later status
+    look outdated and be dropped without a trace.
+    """
     meta = {
-        "version": version or md5sum or "",
+        "md5sum": md5sum or "",
         "datetime": datetime or "",
         "doctype": doctype or "",
     }
     if isinstance(app_metadata, dict):
         meta |= app_metadata
+    # Set last: the callbacks are ordered on this, application metadata must not move it.
+    meta["doc_rev"] = doc_rev or ""
     return meta
 
 
 def build_metadata(msg: IndexMessage) -> dict[str, Any]:
     return metadata_dict(
-        version=msg.version,
+        doc_rev=msg.doc_rev,
         md5sum=msg.md5sum,
         datetime=msg.datetime,
         doctype=msg.doctype,
         app_metadata=msg.app_metadata,
     )
+
+
+def callback_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """Narrow document metadata down to what our own DLQ failure callback carries."""
+    return {field: meta.get(field) for field in _ECHOED_METADATA_FIELDS}
 
 
 async def rag_upsert(

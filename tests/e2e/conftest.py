@@ -17,14 +17,10 @@ from tests.integration.conftest import _docker_is_available, _amqp_is_responsive
 # that must provide a file_url for the consumer to download file content.
 TESTFILE_CONTENT = b"cozy-json test file content"
 
-# ---------- E2E namespace constants ----------
-
 E2E_EXCHANGE = "e2e.test.topic"
 E2E_QUEUE = "e2e.test.q"
 E2E_ROUTING_KEY = "e2e.test.*"
 
-
-# ---------- pytest CLI flag ----------
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -34,8 +30,6 @@ def pytest_addoption(parser):
         help="Run E2E tests against a live OpenRAG at localhost:8083 instead of the stateful stub.",
     )
 
-
-# ---------- Stateful RAG stub ----------
 
 class RagStubState:
     """In-memory state backing the RAG stub server."""
@@ -121,8 +115,6 @@ def _make_rag_stub_app(state: RagStubState) -> web.Application:
     app.router.add_get("/testfile", get_testfile)
     return app
 
-
-# ---------- Fixtures ----------
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def rag_stub():
@@ -212,7 +204,6 @@ async def rmq(require_docker, rabbitmq_url):
 
     yield channel, exchange, queue
 
-    # Cleanup
     cleanup_ch = await connection.channel()
     try:
         await cleanup_ch.queue_delete(E2E_QUEUE)
@@ -224,8 +215,6 @@ async def rmq(require_docker, rabbitmq_url):
         pass
     await connection.close()
 
-
-# ---------- Helper functions ----------
 
 async def publish_msg(exchange, body: bytes, headers: dict) -> None:
     """Publish a persistent message to the E2E routing key."""
@@ -252,8 +241,6 @@ async def consume_and_process(queue, rag_base_url: str) -> None:
     original_headers["rag_base_url"] = rag_base_url
     original_headers["rag_api_key"] = "e2e-test-key"
 
-    # Create a thin wrapper that delegates to the original message
-    # but returns patched headers.
     class _PatchedMessage:
         """Minimal duck-type of aio_pika.IncomingMessage with patched headers."""
 

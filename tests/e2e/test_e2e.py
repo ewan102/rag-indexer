@@ -13,6 +13,7 @@ from aio_pika import Message, DeliveryMode
 
 from rag_indexer.config import DLQ_NAME
 from rag_indexer.errors import TransientError
+from rag_indexer import transport
 from rag_indexer.processing import extract_metadata, get_retry_count
 from rag_indexer.transport import publish_to_dlq
 
@@ -66,7 +67,7 @@ async def test_upsert_new_file(rmq, rag_base_url, rag_state):
         async with session.get(f"{rag_base_url}/partition/e2e-test-auto/file/doc-1") as resp:
             assert resp.status == 200
             data = await resp.json()
-            assert data["metadata"]["version"] == md5
+            assert data["metadata"]["md5sum"] == md5
 
 
 async def test_upsert_forwards_callback_url(rmq, rag_base_url, rag_state):
@@ -100,7 +101,7 @@ async def test_idempotent_skip(rmq, rag_base_url, rag_state):
     await publish_msg(exchange, body, headers)
     await consume_and_process(queue, rag_base_url)
 
-    # No POST or PUT should have been made (only GET for version check)
+    # No POST or PUT should have been made (only GET for the md5sum check)
     calls_after = len([c for c in rag_state.call_log if c["method"] in ("POST", "PUT")])
     assert calls_after == calls_before, "Expected no POST/PUT on idempotent skip"
 
@@ -120,7 +121,7 @@ async def test_update_existing_file(rmq, rag_base_url, rag_state):
         async with session.get(f"{rag_base_url}/partition/e2e-test-auto/file/doc-1") as resp:
             assert resp.status == 200
             data = await resp.json()
-            assert data["metadata"]["version"] == new_md5
+            assert data["metadata"]["md5sum"] == new_md5
 
 
 async def test_delete_file(rmq, rag_base_url):
@@ -203,12 +204,12 @@ async def test_cozy_json_happy_path(rmq, rag_base_url, rag_state):
 
     await consume_and_process_cozy_json(queue)
 
-    # File stored in RAG with correct version
+    # File stored in RAG with correct md5sum
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{rag_base_url}/partition/e2e-cozy-json/file/cozy-happy-doc") as resp:
             assert resp.status == 200
             data = await resp.json()
-            assert data["metadata"]["version"] == md5
+            assert data["metadata"]["md5sum"] == md5
 
     # callback_url was forwarded to OpenRAG as a multipart form field
     posts = [c for c in rag_state.call_log if c["method"] == "POST" and c["file_id"] == "cozy-happy-doc"]
@@ -249,7 +250,7 @@ async def test_cozy_json_dlq_fail(rmq, rag_base_url):
             partition="e2e-cozy-dlq",
             file_id="cozy-dlq-doc",
             callback_url=callback_url,
-            version="v-e2e",
+            doc_rev="3-abc",
             doctype="io.cozy.files",
             app_metadata={"custom": "value"},
         )
@@ -257,6 +258,9 @@ async def test_cozy_json_dlq_fail(rmq, rag_base_url):
         msg = await asyncio.wait_for(queue.get(no_ack=False), timeout=5)
         async with aiohttp.ClientSession() as session:
             await publish_to_dlq(channel, msg, session)
+            # The failure callback is now a detached fire-and-forget task: let it
+            # finish while the session is still open, before this `with` closes it.
+            await asyncio.gather(*transport._callback_tasks)
         await msg.ack()
 
         # Give the async callback POST a moment to complete.
@@ -270,11 +274,11 @@ async def test_cozy_json_dlq_fail(rmq, rag_base_url):
         assert cb["partition"] == "e2e-cozy-dlq"
         assert cb["file_id"] == "cozy-dlq-doc"
         assert cb["status"] == "error"
+        # Narrowed to what cozy's handler reads: app_metadata and md5sum stay out.
         assert cb["metadata"] == {
-            "version": "v-e2e",
+            "doc_rev": "3-abc",
             "datetime": "",
             "doctype": "io.cozy.files",
-            "custom": "value",  # app_metadata merged
         }
         datetime.fromisoformat(cb["timestamp"])  # parsable ISO 8601
 
@@ -470,6 +474,9 @@ async def test_cozy_json_dlq_callback_is_authenticated(rmq, rag_base_url):
         msg = await asyncio.wait_for(queue.get(no_ack=False), timeout=5)
         async with aiohttp.ClientSession() as session:
             await publish_to_dlq(channel, msg, session)
+            # The failure callback is now a detached fire-and-forget task: let it
+            # finish while the session is still open, before this `with` closes it.
+            await asyncio.gather(*transport._callback_tasks)
         await msg.ack()
 
         await asyncio.sleep(0.2)
